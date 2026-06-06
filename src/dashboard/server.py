@@ -10,6 +10,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -18,6 +19,14 @@ from src.dashboard.hub import WATCHLIST_PAGE_SIZE, DashboardHub
 logger = logging.getLogger("arb.dashboard")
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+class RedeemBody(BaseModel):
+    """手动结算请求体。"""
+
+    condition_id: str = ""
+    winners_only: bool = False
+    all_redeemable: bool = False
 
 
 def create_app(hub: DashboardHub) -> FastAPI:
@@ -70,6 +79,75 @@ def create_app(hub: DashboardHub) -> FastAPI:
                 return {"running": False, "pid": pid}
 
         return await asyncio.to_thread(_check)
+
+    @app.get("/api/positions")
+    async def api_positions() -> dict[str, Any]:
+        """可结算持仓列表（含价格百分比）。"""
+        app_ref = hub._app
+
+        async def _fetch() -> dict[str, Any]:
+            items = await app_ref.redeem.list_settlement_candidates(winner_only=False)
+            return {
+                "items": items,
+                "enabled": app_ref.redeem.enabled(),
+                "auto_redeem": app_ref.cfg.auto_redeem_enabled,
+                "threshold_pct": round(app_ref.cfg.redeem_price_threshold * 100, 1),
+            }
+
+        return await _fetch()
+
+    @app.post("/api/redeem")
+    async def api_redeem(body: RedeemBody) -> dict[str, Any]:
+        """手动结算：指定 condition_id，或 winners_only / all_redeemable。"""
+        app_ref = hub._app
+        condition_id = body.condition_id.strip()
+        winners_only = body.winners_only
+        all_redeemable = body.all_redeemable
+
+        async def _run() -> dict[str, Any]:
+            if not app_ref.redeem.enabled():
+                return {"ok": False, "error": "live 模式未配置 FUNDER/PK，或未安装 web3"}
+            if condition_id:
+                positions = await app_ref.redeem.fetch_positions()
+                pos = next((p for p in positions if p.condition_id == condition_id), None)
+                outcome = await asyncio.to_thread(
+                    app_ref.redeem.redeem_condition,
+                    condition_id,
+                    pos=pos,
+                    trigger="manual",
+                    winner_only=False,
+                )
+                return {
+                    "ok": outcome.ok,
+                    "results": [
+                        {
+                            "condition_id": outcome.condition_id,
+                            "title": outcome.title,
+                            "tx_hash": outcome.tx_hash,
+                            "detail": outcome.detail,
+                            "usdc_gained": outcome.usdc_gained,
+                        }
+                    ],
+                }
+            if all_redeemable or winners_only:
+                results = await app_ref.redeem.redeem_all_manual(winners_only=winners_only)
+                return {
+                    "ok": any(r.ok for r in results),
+                    "results": [
+                        {
+                            "condition_id": r.condition_id,
+                            "title": r.title,
+                            "tx_hash": r.tx_hash,
+                            "detail": r.detail,
+                            "usdc_gained": r.usdc_gained,
+                            "ok": r.ok,
+                        }
+                        for r in results
+                    ],
+                }
+            return {"ok": False, "error": "请传 condition_id 或 all_redeemable/winners_only"}
+
+        return await _run()
 
     @app.post("/api/stop")
     async def api_stop() -> dict[str, str]:

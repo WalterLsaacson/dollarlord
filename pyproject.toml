@@ -20,6 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 live = [
     "py-clob-client-v2>=1.0.0",
+    "web3>=6.0",
+    "eth-abi>=4.0",
+    "eth-keys>=0.4",
 ]
 
 [project.scripts]

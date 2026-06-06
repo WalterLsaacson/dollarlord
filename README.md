@@ -10,7 +10,8 @@
 - **多源竞速**：ESPN、OpenLigaDB、football-data、API-Football、BallDontLie 等并行，取最快终局；冲突熔断
 - **开球校验**：同名不同日场次按 `game_start_time` 对齐，避免旧赛果误触发未来盘
 - **分级下单**：按 `max_round_notional_usd` 与盘口深度逐级尝试 FOK
-- **Dashboard**：内嵌 Web UI（`http://127.0.0.1:8787`），Watchlist / 成交错过 / 启停控制
+- **Dashboard**：内嵌 Web UI（`http://127.0.0.1:8787`），Watchlist / 成交错过 / **持仓结算** / 启停控制
+- **持仓结算**：胜方 token 价格 ≥ **0.998** 时自动链上 redeem；Dashboard 可手动结算
 - **双环境**：大陆本地代理测试 / 伦敦 VPS 直连生产
 - **模式**：`paper`（模拟）/ `live`（真金）
 

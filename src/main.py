@@ -22,6 +22,7 @@ from src.net.proxy import ProxyTransport
 from src.net.rate_limit import AsyncRateLimiter, MultiWindowRateLimiter
 from src.pm.clob_ws import ClobOrderbookFeed
 from src.pm.gamma_sync import GammaSync
+from src.pm.redeem import RedeemService
 from src.sports.aggregator import FixtureAggregator
 from src.sports.api_football import ApiFootballProvider
 from src.sports.balldontlie import BallDontLieProvider
@@ -51,6 +52,7 @@ class ArbApp:
             cfg, self.store, self.matcher, self.aggregator, self.books, self.ladder
         )
         self.gamma = GammaSync(cfg, self.proxy, self.store)
+        self.redeem = RedeemService(cfg, self.store, self.proxy)
 
         # ---- 各数据源独立限流器（分开计数，互不影响）----
         self.limiters: dict[str, Any] = {
@@ -153,7 +155,7 @@ class ArbApp:
 
             tasks.append(
                 asyncio.create_task(
-                    run_dashboard_server(hub, self.cfg.dashboard_host, self.cfg.dashboard_port),
+                    self._run_dashboard_safe(hub, self.cfg.dashboard_host, self.cfg.dashboard_port),
                     name="dashboard",
                 )
             )
@@ -161,6 +163,9 @@ class ArbApp:
 
             emit_event("status.updated", {})
             self._emit_initial_source_health()
+
+        if self.cfg.auto_redeem_enabled and self.redeem.enabled():
+            tasks.append(asyncio.create_task(self._redeem_loop(), name="redeem"))
 
         log_event(
             logger,
@@ -179,6 +184,26 @@ class ArbApp:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    async def _run_dashboard_safe(self, hub: Any, host: str, port: int) -> None:
+        """Dashboard 绑定失败时不拖垮整个 bot。"""
+        from src.dashboard.server import run_dashboard_server
+
+        try:
+            await run_dashboard_server(hub, host, port)
+        except OSError as e:
+            log_event(
+                logger,
+                "Dashboard 启动失败",
+                host=host,
+                port=port,
+                error=str(e),
+                hint="8787 被占用时可执行 ./scripts/stop_bot.sh 后重启",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Dashboard 异常退出: %s", e)
 
     def _emit_initial_source_health(self) -> None:
         """Dashboard 启动时推送各数据源初始状态（未配置 Key 的显示为 disabled）。"""
@@ -326,6 +351,22 @@ class ArbApp:
             await self.books.ws_loop()
         except asyncio.CancelledError:
             pass
+
+    async def _redeem_loop(self) -> None:
+        """轮询持仓：胜方 token 价格≥阈值（≈100%）且 redeemable 时自动链上结算。"""
+        # 启动后稍等，避免与 health 初始化抢 RPC
+        await asyncio.sleep(15)
+        while not self._stop.is_set():
+            try:
+                results = await self.redeem.auto_redeem_winners()
+                for r in results:
+                    if r.ok:
+                        from src.dashboard.bus import emit_event
+
+                        emit_event("positions.changed", {"condition_id": r.condition_id})
+            except Exception as e:
+                logger.warning("自动结算轮询异常: %s", e)
+            await asyncio.sleep(self.cfg.redeem_poll_sec)
 
     async def _health_loop(self) -> None:
         from src.health import critical_failures, optional_failures, run_health_checks

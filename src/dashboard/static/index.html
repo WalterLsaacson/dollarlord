@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Polymarket Arb Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=5" />
+  <link rel="stylesheet" href="/static/style.css?v=7" />
 </head>
 <body>
   <header class="header">
@@ -24,6 +24,29 @@
     <section class="panel">
       <h2>健康检查</h2>
       <div id="health-grid" class="health-grid"></div>
+    </section>
+
+    <!-- 持仓结算（放在 Watchlist 上方，便于发现） -->
+    <section class="panel panel-settlement" id="panel-settlement">
+      <h2>持仓结算 <span class="hint">价格≈100% 可 redeem 为 USDC · 阈值 99.8%</span></h2>
+      <div class="control-row positions-actions">
+        <button id="btn-redeem-winners" type="button" class="btn-primary">结算全部胜方</button>
+        <button id="btn-redeem-all" type="button" class="btn-secondary">结算全部可赎回</button>
+        <button id="btn-positions-refresh" type="button" class="btn-secondary">刷新持仓</button>
+      </div>
+      <p id="positions-hint" class="control-hint muted">加载中…</p>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>场次</th>
+            <th>份额</th>
+            <th>价格%</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="positions-body"></tbody>
+      </table>
     </section>
 
     <!-- Watchlist -->
@@ -94,6 +117,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

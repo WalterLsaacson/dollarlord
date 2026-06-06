@@ -119,6 +119,8 @@ class DashboardHub:
             await self.broadcast({"type": "watchlist.page", "data": data})
         elif event_type == "history.new":
             await self.broadcast({"type": "history.new", "item": payload})
+        elif event_type == "positions.changed":
+            await self.broadcast({"type": "positions.changed", "data": {}})
         elif event_type == "status.updated":
             await self.broadcast({"type": "status.updated", "data": self.build_status()})
         elif event_type == "log.append":
@@ -320,6 +322,8 @@ class DashboardHub:
             "live_paused": app.risk.live_paused,
             "armed_count": len(app.signals._armed),
             "watchlist_total": self._watchlist_total or len(self._app.store.list_future_watchlist()),
+            "auto_redeem_enabled": app.cfg.auto_redeem_enabled,
+            "redeem_enabled": app.redeem.enabled(),
         }
 
     def build_snapshot(self, watchlist_page: int = 1, history_page: int = 1) -> dict[str, Any]:

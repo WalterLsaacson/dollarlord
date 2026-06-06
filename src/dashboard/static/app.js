@@ -8,6 +8,7 @@
   const state = {
     watchlist: { items: [], total: 0, page: 1, page_size: WATCHLIST_PAGE_SIZE },
     history: { items: [], total: 0, page: 1, page_size: 5 },
+    positions: { items: [], enabled: false, auto_redeem: false, threshold_pct: 99.8 },
     health: [],
     focus: null,
     status: {},
@@ -236,8 +237,10 @@
     tbody.innerHTML = "";
     for (const row of state.history.items) {
       const tr = document.createElement("tr");
-      const kind = row.kind === "success" ? "成交" : "错过";
-      const tagClass = row.kind === "success" ? "success" : "missed";
+      const kind =
+        row.kind === "success" ? "成交" : row.kind === "redeem" ? "结算" : "错过";
+      const tagClass =
+        row.kind === "success" ? "success" : row.kind === "redeem" ? "redeem" : "missed";
       tr.innerHTML = `
         <td>${fmtHistoryTime(row)}</td>
         <td><span class="tag ${tagClass}">${kind}</span></td>
@@ -267,6 +270,84 @@
     renderHistory();
   }
 
+  function renderPositions() {
+    const tbody = $("positions-body");
+    const hint = $("positions-hint");
+    tbody.innerHTML = "";
+    const p = state.positions;
+    if (!p.enabled) {
+      hint.textContent = "结算未启用：需 live 模式 + polymarket-arb.env 中 FUNDER/PK，并 pip install -e \".[live]\"";
+      return;
+    }
+    hint.textContent = `自动结算：${p.auto_redeem ? "开" : "关"} · 触发阈值 ${p.threshold_pct}% · EOA 需有 POL 付 gas`;
+    for (const row of p.items || []) {
+      const tr = document.createElement("tr");
+      const status = row.already_redeemed
+        ? "已结算"
+        : row.is_winner
+          ? "胜方"
+          : row.redeemable
+            ? "可赎回"
+            : "—";
+      const canRedeem = row.redeemable && !row.already_redeemed;
+      tr.innerHTML = `
+        <td title="${escapeHtml(row.title || "")}">${escapeHtml((row.title || "").slice(0, 36))}</td>
+        <td>${row.size ?? "—"}</td>
+        <td>${row.cur_price_pct ?? "—"}</td>
+        <td>${status}</td>
+        <td>${
+          canRedeem
+            ? `<button class="btn-mini btn-redeem-one" data-cid="${escapeHtml(row.condition_id)}">结算</button>`
+            : "—"
+        }</td>`;
+      tbody.appendChild(tr);
+    }
+    tbody.querySelectorAll(".btn-redeem-one").forEach((btn) => {
+      btn.addEventListener("click", () => redeemOne(btn.dataset.cid));
+    });
+  }
+
+  async function loadPositions() {
+    try {
+      const r = await fetch("/api/positions");
+      const data = await r.json();
+      state.positions = data;
+      renderPositions();
+    } catch (e) {
+      $("positions-hint").textContent = "持仓加载失败";
+    }
+  }
+
+  async function redeemOne(conditionId) {
+    if (!conditionId || !confirm("确认链上结算该持仓？需消耗少量 POL gas")) return;
+    const r = await fetch("/api/redeem", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ condition_id: conditionId }),
+    });
+    const data = await r.json();
+    alert(data.ok ? "结算已提交" : data.error || data.results?.[0]?.detail || "结算失败");
+    await loadPositions();
+  }
+
+  async function redeemBatch(winnersOnly) {
+    const msg = winnersOnly
+      ? "结算全部胜方持仓（价格≈100%）？"
+      : "结算全部可赎回持仓（含输家清零）？";
+    if (!confirm(msg)) return;
+    const r = await fetch("/api/redeem", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        winnersOnly ? { winners_only: true } : { all_redeemable: true }
+      ),
+    });
+    const data = await r.json();
+    const okN = (data.results || []).filter((x) => x.ok).length;
+    alert(data.ok ? `完成 ${okN} 笔结算` : data.error || "无持仓可结算");
+    await loadPositions();
+  }
+
   function renderStatus() {
     const s = state.status;
     $("runtime-info").innerHTML = `
@@ -277,7 +358,7 @@
       <div><span>Geoblock</span> ${s.geoblocked ? "是" : "否"}</div>
       <div><span>暂停</span> ${s.live_paused ? "是" : "否"}</div>
       <div><span>Armed</span> ${s.armed_count ?? 0}</div>`;
-    $("status-bar").textContent = `WS 已连接 · ${s.mode || ""} · armed ${s.armed_count ?? 0}`;
+    $("status-bar").textContent = `WS 已连接 · ${s.mode || ""} · armed ${s.armed_count ?? 0} · 自动结算 ${s.auto_redeem_enabled ? "开" : "关"}`;
 
     const bar = $("alert-bar");
     if (s.geoblocked) {
@@ -342,6 +423,7 @@
         renderHistory();
         renderStatus();
         renderLogs();
+        loadPositions();
         break;
       case "health.update":
         patchHealthItem(msg.item);
@@ -401,6 +483,9 @@
         state.history = msg.data;
         setHistoryLoading(false);
         renderHistory();
+        break;
+      case "positions.changed":
+        loadPositions();
         break;
       case "log.append":
         appendLog(msg.line);
@@ -497,6 +582,10 @@
     await fetch("/api/restart", { method: "POST" });
     alert("重启指令已发送，请稍候刷新页面");
   });
+
+  $("btn-redeem-winners")?.addEventListener("click", () => redeemBatch(true));
+  $("btn-redeem-all")?.addEventListener("click", () => redeemBatch(false));
+  $("btn-positions-refresh")?.addEventListener("click", () => loadPositions());
 
   $("log-search").addEventListener("input", renderLogs);
 

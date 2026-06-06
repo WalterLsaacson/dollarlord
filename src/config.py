@@ -100,6 +100,13 @@ class AppConfig(BaseModel):
     max_daily_trades: int = 100
     max_consecutive_failures: int = 5
 
+    # ---- 持仓结算（redeem）----
+    auto_redeem_enabled: bool = True
+    redeem_poll_sec: int = 120
+    # curPrice ≥ 此值视为胜方「100%」，触发自动结算
+    redeem_price_threshold: float = 0.998
+    polygon_rpc_url: str = "https://polygon-rpc.com"
+
     # ---- 可视化 Dashboard（内嵌 Web，事件推送）----
     dashboard_enabled: bool = True
     dashboard_host: str = "127.0.0.1"

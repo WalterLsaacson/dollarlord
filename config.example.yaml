@@ -54,3 +54,9 @@ webhook_url: ""
 # live 模式风控
 max_daily_trades: 100
 max_consecutive_failures: 5
+
+# ---- 持仓结算（胜方 token 价格≈100% 时链上 redeem）----
+auto_redeem_enabled: true
+redeem_poll_sec: 120
+redeem_price_threshold: 0.998
+polygon_rpc_url: "https://polygon-rpc.com"

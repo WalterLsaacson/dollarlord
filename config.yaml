@@ -75,3 +75,10 @@ log_path: "logs/arb.jsonl"
 dashboard_enabled: true
 dashboard_host: "127.0.0.1"
 dashboard_port: 8787
+
+# ---- 持仓结算 ----
+auto_redeem_enabled: true
+redeem_poll_sec: 120
+# curPrice ≥ 0.998（99.8%）时自动链上 redeem
+redeem_price_threshold: 0.998
+polygon_rpc_url: "https://polygon-rpc.com"

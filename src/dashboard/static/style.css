@@ -67,6 +67,14 @@ body {
   box-shadow: var(--shadow);
 }
 .panel-wide { grid-column: 1 / -1; }
+.panel-settlement {
+  grid-column: 1 / -1;
+  border-color: #93c5fd;
+  background: linear-gradient(180deg, #f8fbff 0%, var(--panel) 100%);
+}
+.panel-settlement .positions-actions .btn-primary {
+  min-width: 8rem;
+}
 .panel h2 { margin: 0 0 0.75rem; font-size: 1rem; }
 .panel h3 { margin: 1rem 0 0.5rem; font-size: 0.9rem; color: var(--muted); }
 
@@ -142,7 +150,20 @@ body {
   font-size: 0.7rem;
 }
 .tag.success { background: #d1fae5; color: var(--green); }
+.tag.redeem { background: #dbeafe; color: #1d4ed8; }
 .tag.missed { background: #fee2e2; color: var(--red); }
+
+.positions-actions { margin-bottom: 0.75rem; }
+
+.btn-mini {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  cursor: pointer;
+}
+.btn-mini:hover { background: #f1f5f9; }
 .tag.armed { background: #dbeafe; color: var(--accent); }
 
 .pager {

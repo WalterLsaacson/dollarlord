@@ -143,6 +143,31 @@ class Store:
         )
         self._conn.commit()
         self._ensure_signal_events_table(cur)
+        self._ensure_redemptions_table(cur)
+
+    def _ensure_redemptions_table(self, cur: sqlite3.Cursor) -> None:
+        """迁移：结算记录表。"""
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS redemptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id TEXT,
+                title TEXT,
+                size REAL,
+                cur_price REAL,
+                usdc_gained REAL,
+                tx_hash TEXT,
+                status TEXT,
+                detail TEXT,
+                trigger TEXT,
+                created_at REAL
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_redemptions_condition ON redemptions(condition_id)"
+        )
+        self._conn.commit()
 
     def upsert_market(self, row: MarketRow, **extra: Any) -> None:
         """插入或更新市场。"""
@@ -399,6 +424,80 @@ class Store:
         )
         return event_id
 
+    def is_condition_redeemed(self, condition_id: str) -> bool:
+        """该 condition 是否已成功结算过（避免重复发链上交易）。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT 1 FROM redemptions
+            WHERE condition_id=? AND status='success'
+            LIMIT 1
+            """,
+            (condition_id,),
+        )
+        return cur.fetchone() is not None
+
+    def record_redemption(
+        self,
+        *,
+        condition_id: str,
+        title: str,
+        size: float,
+        cur_price: float,
+        tx_hash: str,
+        status: str,
+        detail: str = "",
+        trigger: str = "manual",
+        usdc_gained: float = 0.0,
+    ) -> int:
+        """写入结算记录并推送 Dashboard。"""
+        cur = self._conn.cursor()
+        ts = time.time()
+        cur.execute(
+            """
+            INSERT INTO redemptions
+            (condition_id, title, size, cur_price, usdc_gained, tx_hash, status, detail, trigger, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                condition_id,
+                title,
+                size,
+                cur_price,
+                usdc_gained,
+                tx_hash,
+                status,
+                detail,
+                trigger,
+                ts,
+            ),
+        )
+        self._conn.commit()
+        rid = int(cur.lastrowid)
+        from src.dashboard.bus import emit_event
+
+        emit_event(
+            "history.new",
+            {
+                "kind": "redeem",
+                "id": rid,
+                "market_id": "",
+                "event_type": "redeem",
+                "reason": status,
+                "detail": detail or tx_hash,
+                "sport": "",
+                "team_a": title,
+                "team_b": trigger,
+                "question": title,
+                "price": usdc_gained,
+                "notional_usd": usdc_gained,
+                "created_at": ts,
+                "created_at_display": format_ts_beijing(ts),
+            },
+        )
+        emit_event("positions.changed", {})
+        return rid
+
     def list_trades(self, limit: int = 5, offset: int = 0) -> list[sqlite3.Row]:
         cur = self._conn.cursor()
         cur.execute(
@@ -453,6 +552,12 @@ class Store:
                    m.question, s.team_a, s.team_b, s.sport, s.event_type
             FROM signal_events s
             LEFT JOIN markets m ON m.market_id = s.market_id
+            UNION ALL
+            SELECT 'redeem' AS kind, r.id, NULL, NULL, r.usdc_gained, r.cur_price,
+                   r.status AS reason, r.detail, r.created_at,
+                   r.title AS question, r.title AS team_a, r.trigger AS team_b,
+                   '' AS sport, 'redeem' AS event_type
+            FROM redemptions r
             ORDER BY created_at DESC
             """
         )

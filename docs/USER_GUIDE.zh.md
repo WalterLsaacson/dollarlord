@@ -55,7 +55,7 @@ python -m src.health config.yaml
 | 脚本 | 行为 |
 |------|------|
 | `start_bot.sh` | `nohup` 后台运行，PID 写入 `logs/bot.pid`，标准输出 → `logs/bot_stdout.log` |
-| `stop_bot.sh` | 读取 PID 并 `kill`；若进程已不存在则尝试 `pkill -f "python.*-m src.main"` |
+| `stop_bot.sh` | 停止 bot 并**等待 8787 端口释放**（避免重启时 Dashboard bind 失败） |
 
 启动成功后会输出：
 
@@ -78,7 +78,7 @@ python -m src.health config.yaml
 **注意**：
 
 - 点击 **停止** 会结束整个 bot 进程，**Dashboard 也会一起退出**。
-- 停止后需重新执行 `./scripts/start_bot.sh`，或在仍打开的 Dashboard 页点 **启动**（若页面已断开则只能走脚本）。
+- 停止后需重新执行 `./scripts/start_bot.sh`；**重启前若 Dashboard 打不开**，先 `./scripts/stop_bot.sh` 等 8787 释放再启动。
 - **重启** 适用于改完配置或代码后热更新进程。
 
 ### 2.3 前台调试（开发用）
@@ -169,7 +169,27 @@ python -m src.main --config config.yaml
 | `max_daily_trades` | `100` | 当日成交笔数上限 |
 | `max_consecutive_failures` | `5` | 连续下单失败后暂停 live |
 
-### 3.7 Dashboard 与存储
+### 3.7 持仓结算（redeem）
+
+| 配置项 | 默认 | 含义 |
+|--------|------|------|
+| `auto_redeem_enabled` | `true` | 是否自动轮询并结算胜方持仓 |
+| `redeem_poll_sec` | `120` | 自动结算轮询间隔（秒） |
+| `redeem_price_threshold` | `0.998` | Data API 的 `curPrice` ≥ 此值视为胜方「100%」，触发**自动**结算（0.998 = 99.8%） |
+| `polygon_rpc_url` | `https://polygon-rpc.com` | Polygon RPC（链上 redeem 用） |
+
+**前提**（live 模式）：
+
+- `polymarket-arb.env` 中已配置 `FUNDER`（Proxy/Safe 地址）与 `PK`（Safe 所有者 EOA 私钥）
+- EOA 钱包内有少量 **POL** 支付 gas（redeem 走 Safe `execTransaction`）
+- 已安装：`pip install -e ".[live]"`（含 `web3` / `eth-abi` / `eth-keys`）
+
+**逻辑**：
+
+- **自动**：每 `redeem_poll_sec` 拉取持仓；`redeemable=true` 且 `curPrice ≥ 0.998`（99.8%）的胜方场次，链上调用 `redeemPositions` 换回 USDC。
+- **手动**：Dashboard「持仓结算」面板可单场结算，或「结算全部胜方 / 全部可赎回」（手动不受 0.998 限制，只要 `redeemable` 即可）。
+
+### 3.8 Dashboard 与存储
 
 | 配置项 | 默认 | 含义 |
 |--------|------|------|
@@ -216,12 +236,29 @@ python -m src.main --config config.yaml
 
 展示当前最值得关注的一场：比分、开赛时间、Yes/No 报价、是否 ARMED。
 
-### 4.3 历史（成交 / 错过）
+### 4.4 持仓结算
+
+展示 `FUNDER` 钱包在 Polymarket 的持仓：
+
+| 列 | 含义 |
+|----|------|
+| 场次 | 市场标题 |
+| 份额 | 持有 outcome token 数量 |
+| 价格% | 当前价 × 100；**≥ 99.8%** 时自动结算（对应 `redeem_price_threshold: 0.998`） |
+| 状态 | 胜方 / 可赎回 / 已结算 |
+| 操作 | 单场「结算」按钮 |
+
+顶部按钮：**结算全部胜方**（仅价格 ≥ 99.8%）、**结算全部可赎回**（含输家清零，不要求 0.998）。
+
+结算成功会写入历史记录，类型为 **结算**（`kind: redeem`），日志事件 `REDEEM_OK` / `REDEEM_FAIL`。
+
+### 4.5 历史（成交 / 错过 / 结算）
 
 合并 `trades` 与 `signal_events` 表，按时间倒序。类型标签：
 
 - **成交**（`kind: success`）：真实或 paper 成交
 - **错过**（`kind: missed`）：策略跳过或未成交
+- **结算**（`kind: redeem`）：链上 redeem 成功/失败记录
 
 ---
 
@@ -327,7 +364,7 @@ Dashboard 历史来自 SQLite；完整链路可查 JSONL。与策略相关的主
 | `STRATEGY_LIVE_SIGNAL` | 直播价触发 |
 | `FINAL` | 聚合器确认终局（在 aggregator 日志） |
 | `WATCH_ADD` | 市场加入 watchlist |
-| `UNMAPPED` | 无法从队名匹配市场 |
+| `REDEEM_AUTO` / `REDEEM_OK` / `REDEEM_FAIL` | 自动/成功/失败结算 |
 
 ---
 
@@ -342,8 +379,13 @@ Dashboard 历史来自 SQLite；完整链路可查 JSONL。与策略相关的主
 **Q：队名对不上、日志出现 UNMAPPED？**  
 在 SQLite `team_aliases` 表添加别名映射，见 README「队名映射」。
 
-**Q：误下单后能否自动撤单？**  
-不能；需在 Polymarket 网页端人工处理持仓。
+| `UNMAPPED` | 无法从队名匹配市场 |
+
+**Q：结算按钮灰色或提示未启用？**  
+确认 `mode: live`、`FUNDER`/`PK` 已配置，且已 `pip install -e ".[live]"`。
+
+**Q：结算交易失败？**  
+检查 EOA 是否有 POL gas；RPC 是否可用（可改 `polygon_rpc_url`）。
 
 ---
 
