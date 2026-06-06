@@ -1,0 +1,64 @@
+# 与 config.yaml 相同（本机默认配置别名，便于文档中的 --config config.local.yaml）
+
+environment: local_cn
+mode: live
+
+proxy:
+  enabled: true
+  socks5_url: "socks5://127.0.0.1:1082"
+  http_url: "http://127.0.0.1:1082"
+
+entry_max_price: 0.99
+max_round_notional_usd: 10
+order_ladder_usd: [10, 5]
+min_ladder_step_usd: 5
+market_cooldown_sec: 3600
+
+early_entry_enabled: true
+early_entry_price: 0.60
+football_min_elapsed_min: 80
+football_fallback_wallclock_min: 95
+nba_early_entry_enabled: false
+nba_min_period: 4
+
+gamma_sync_interval_sec: 900
+sports_poll_live_sec: 2
+sports_poll_idle_sec: 60
+clob_eligible_poll_sec: 1.5
+
+rate_football_data_per_min: 10
+rate_api_football_per_min: 10
+rate_thesportsdb_per_min: 30
+rate_balldontlie_per_min: 5
+rate_espn_per_min: 60
+rate_openligadb_per_min: 15
+rate_nba_api_per_min: 10
+api_football_daily_quota: 95
+
+thesportsdb_key: "123"
+sports: [football, nba]
+
+espn_soccer_leagues:
+  - fifa.friendly
+  - fifa.world
+  - fifa.worldq.uefa
+  - fifa.worldq.conmebol
+  - fifa.worldq.concacaf
+  - fifa.worldq.afc
+  - fifa.worldq.caf
+  - uefa.nations
+  - conmebol.america
+  - jpn.1
+  - esp.2
+  - bra.1
+  - eng.1
+  - esp.1
+  - ger.1
+  - ita.1
+  - fra.1
+  - usa.1
+  - uefa.champions
+  - uefa.europa
+
+db_path: "data/arb.db"
+log_path: "logs/arb.jsonl"

@@ -1,0 +1,32 @@
+[project]
+name = "polymarket-settlement-arb"
+version = "0.1.0"
+description = "Polymarket 体育赛事结算延迟套利 bot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx[socks]>=0.27.0",
+    "socksio>=1.0.0",
+    "websockets>=12.0",
+    "python-socks[asyncio]>=2.4.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "nba_api>=1.4.0",
+]
+
+[project.optional-dependencies]
+live = [
+    "py-clob-client-v2>=1.0.0",
+]
+
+[project.scripts]
+polymarket-arb = "src.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]

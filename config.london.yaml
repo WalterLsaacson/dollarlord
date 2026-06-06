@@ -1,0 +1,82 @@
+# 英国伦敦生产 — 直连，无代理
+
+environment: london
+mode: live
+
+proxy:
+  enabled: false
+  socks5_url: ""
+  http_url: ""
+
+entry_max_price: 0.99
+# 小资金账户示例：10 USDC
+max_round_notional_usd: 10
+order_ladder_usd: [10, 5]
+min_ladder_step_usd: 5
+market_cooldown_sec: 3600
+
+# ---- 价格驱动早进场策略（不死等 final）----
+early_entry_enabled: true
+# 某一方价格 >= 0.95 且 <= entry_max_price 即买入（博更高收益，承担结果反转风险）
+early_entry_price: 0.95
+# 足球：开赛 80 分钟后才进入轮询/下单（之前悬念较大，不参与）
+football_min_elapsed_min: 80
+# 拿不到真实比赛分钟时，用开赛后墙钟分钟兜底（含中场休息缓冲）
+football_fallback_wallclock_min: 95
+# NBA：进入第四节后才允许早进场
+nba_min_period: 4
+
+gamma_sync_interval_sec: 900
+# 有比赛进入后段时高频轮询赛果，平时低频省额度
+sports_poll_live_sec: 2
+sports_poll_idle_sec: 60
+# 命中早进场后的盘口高频轮询间隔（秒）
+clob_eligible_poll_sec: 1.5
+
+# ---- 各数据源每分钟限流（分开计数）----
+rate_football_data_per_min: 10
+rate_api_football_per_min: 10
+rate_thesportsdb_per_min: 30
+rate_balldontlie_per_min: 5
+# ESPN 无官方硬限，联赛较多，放宽到 60/min（配合轮询轮转避免饿死后面的联赛）
+rate_espn_per_min: 60
+rate_openligadb_per_min: 15
+rate_nba_api_per_min: 10
+# API-Football 免费层每日配额保护
+api_football_daily_quota: 95
+
+# ---- 数据源 API key（留空则自动禁用该源；建议用 /etc/polymarket-arb.env 注入）----
+# football_data_api_key: ""
+# api_football_key: ""
+thesportsdb_key: "123"   # 官方免费公共 key
+# balldontlie_key: ""
+
+sports: [football, nba]
+
+# ESPN 足球联赛 slug：覆盖 PM 当季实际开盘的赛事（友谊赛/世界杯及预选/J联赛/西乙
+# 等），并保留五大联赛+欧战，赛季恢复后自动生效。NBA 用 ESPN 通用记分牌无需配联赛。
+espn_soccer_leagues:
+  - fifa.friendly        # 国家队友谊赛（当前 PM 主力）
+  - fifa.world           # 世界杯
+  - fifa.worldq.uefa     # 世预赛-欧洲
+  - fifa.worldq.conmebol # 世预赛-南美
+  - fifa.worldq.concacaf # 世预赛-中北美
+  - fifa.worldq.afc      # 世预赛-亚洲
+  - fifa.worldq.caf      # 世预赛-非洲
+  - uefa.nations         # 欧国联
+  - conmebol.america     # 美洲杯
+  - jpn.1                # 日本 J1 联赛
+  - esp.2                # 西乙
+  - bra.1                # 巴西甲
+  - eng.1                # 英超
+  - esp.1                # 西甲
+  - ger.1                # 德甲
+  - ita.1                # 意甲
+  - fra.1                # 法甲
+  - usa.1                # 美职联
+  - uefa.champions       # 欧冠
+  - uefa.europa          # 欧联
+
+# systemd 部署时 config 位于 /etc/polymarket-arb/，须使用绝对路径
+db_path: "/opt/polymarket-settlement-arb/data/arb.db"
+log_path: "/opt/polymarket-settlement-arb/logs/arb.jsonl"

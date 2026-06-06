@@ -1,0 +1,21 @@
+# 本地快速试跑（约 30 秒可见日志）— 无代理；paper 不需私钥
+
+environment: local_cn
+mode: paper
+
+proxy:
+  enabled: false
+
+entry_max_price: 0.99
+max_round_notional_usd: 50
+min_ladder_step_usd: 5
+
+# 加快同步便于观察
+gamma_sync_interval_sec: 15
+sports_poll_live_sec: 3
+sports_poll_idle_sec: 10
+health_interval_sec: 600
+
+sports: [football, nba]
+db_path: "data/arb.db"
+log_path: "logs/arb.jsonl"

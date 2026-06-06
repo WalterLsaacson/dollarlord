@@ -1,0 +1,23 @@
+[Unit]
+Description=Polymarket Settlement Arbitrage Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket-arb
+Group=polymarket-arb
+WorkingDirectory=/opt/polymarket-settlement-arb
+EnvironmentFile=/etc/polymarket-arb.env
+ExecStart=/opt/polymarket-settlement-arb/.venv/bin/python -m src.main --config /etc/polymarket-arb/config.yaml
+Restart=always
+RestartSec=10
+# 可选看门狗（需进程内 sd_notify）
+# WatchdogSec=300
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-arb
+
+[Install]
+WantedBy=multi-user.target

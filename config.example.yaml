@@ -1,0 +1,56 @@
+# Polymarket 结算延迟套利 — 配置模板（复制为 config.local.yaml 或 config.london.yaml）
+
+environment: local_cn  # local_cn | london
+mode: paper            # paper | live
+
+proxy:
+  enabled: true
+  socks5_url: "socks5://127.0.0.1:1080"
+  http_url: "http://127.0.0.1:1080"
+
+# 交易参数
+entry_max_price: 0.99
+max_round_notional_usd: 50
+order_ladder_usd: [50, 25, 10, 5]  # 省略则按 max 自动减半
+min_ladder_step_usd: 5
+market_cooldown_sec: 3600
+
+# 轮询与同步
+gamma_sync_interval_sec: 900
+sports_poll_live_sec: 2
+sports_poll_idle_sec: 60
+conflict_window_sec: 120
+health_interval_sec: 300
+
+# 体育类型
+sports: [football, nba]
+
+# ESPN 足球联赛 slug（可按需扩展）
+espn_soccer_leagues:
+  - eng.1
+  - esp.1
+  - ger.1
+  - usa.1
+  - uefa.champions
+  - uefa.europa
+
+# OpenLigaDB shortcut
+openligadb_leagues:
+  - bl1
+  - ucl
+
+# Polymarket
+gamma_base_url: "https://gamma-api.polymarket.com"
+clob_host: "https://clob.polymarket.com"
+clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+# 路径
+db_path: "data/arb.db"
+log_path: "logs/arb.jsonl"
+
+# 可选告警
+webhook_url: ""
+
+# live 模式风控
+max_daily_trades: 100
+max_consecutive_failures: 5
