@@ -80,9 +80,9 @@ class FootballDataProvider:
             u = self._parse_match(m)
             if u:
                 updates.append(u)
-        if updates:
-            self.store.touch_source(self.source_id)
-            self._last = updates
+        # 请求成功即更新健康状态（即使当日无赛程）
+        self.store.touch_source(self.source_id)
+        self._last = updates
         return updates
 
     def _parse_match(self, m: dict) -> FixtureUpdate | None:

@@ -77,9 +77,9 @@ class ApiFootballProvider:
             u = self._parse_fixture(item)
             if u:
                 updates.append(u)
-        if updates:
-            self.store.touch_source(self.source_id)
-            self._last = updates
+        # 请求成功即更新健康状态（live=all 无进行中比赛时也视为正常）
+        self.store.touch_source(self.source_id)
+        self._last = updates
         return updates
 
     def _parse_fixture(self, item: dict) -> FixtureUpdate | None:

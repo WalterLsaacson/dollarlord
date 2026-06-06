@@ -100,6 +100,11 @@ class AppConfig(BaseModel):
     max_daily_trades: int = 100
     max_consecutive_failures: int = 5
 
+    # ---- 可视化 Dashboard（内嵌 Web，事件推送）----
+    dashboard_enabled: bool = True
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8787
+
     # 运行时根目录（加载配置后设置）
     project_root: Path = Field(default_factory=Path.cwd)
 

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Polymarket Arb Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css?v=5" />
+</head>
+<body>
+  <header class="header">
+    <h1>Polymarket 结算套利 Bot</h1>
+    <div id="alert-bar" class="alert-bar hidden"></div>
+    <div id="status-bar" class="status-bar">连接中…</div>
+  </header>
+
+  <main class="grid">
+    <!-- 焦点比赛：ARMED / 直播中优先，非「下一场待开赛」 -->
+    <section class="panel focus-panel" id="focus-panel">
+      <h2>焦点比赛 <span class="hint">ARMED 或直播优先 · 非单纯「下一场」</span></h2>
+      <div id="focus-content" class="focus-content muted">暂无监听中的比赛</div>
+    </section>
+
+    <!-- 健康检查 -->
+    <section class="panel">
+      <h2>健康检查</h2>
+      <div id="health-grid" class="health-grid"></div>
+    </section>
+
+    <!-- Watchlist -->
+    <section class="panel">
+      <h2>Watchlist <span id="watchlist-total" class="badge">0</span></h2>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>开赛(北京)</th>
+            <th>对阵</th>
+            <th>比分</th>
+            <th>进度</th>
+            <th>Yes</th>
+            <th>No</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody id="watchlist-body"></tbody>
+      </table>
+      <div class="pager">
+        <button id="wl-prev" disabled>上一页</button>
+        <span id="wl-page-info">1 / 1</span>
+        <button id="wl-next" disabled>下一页</button>
+      </div>
+    </section>
+
+    <!-- 成交 / 错过 -->
+    <section class="panel">
+      <h2>成交 / 错过 <span id="history-total" class="badge">0</span></h2>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>时间(北京)</th>
+            <th>类型</th>
+            <th>对阵</th>
+            <th>原因</th>
+            <th>价格</th>
+          </tr>
+        </thead>
+        <tbody id="history-body"></tbody>
+      </table>
+      <div class="pager">
+        <button id="hist-prev" disabled>上一页</button>
+        <span id="hist-page-info">1 / 1</span>
+        <button id="hist-next" disabled>下一页</button>
+      </div>
+    </section>
+
+    <!-- 运行状态 + 日志 -->
+    <section class="panel panel-wide">
+      <h2>运行状态</h2>
+      <div id="runtime-info" class="runtime-info"></div>
+      <div class="control-row">
+        <button id="btn-start" class="btn-primary">启动 Bot</button>
+        <button id="btn-stop" class="btn-secondary">停止 Bot</button>
+        <button id="btn-restart" class="btn-danger">重启 Bot</button>
+      </div>
+      <p class="control-hint">
+        停止后 Dashboard 会断开；再次启动请点「启动 Bot」，或在项目目录执行
+        <code>./scripts/start_bot.sh</code>
+      </p>
+      <h3>实时日志</h3>
+      <div id="log-filter" class="log-filter">
+        <label><input type="checkbox" id="log-autoscroll" checked /> 自动滚动</label>
+        <input type="text" id="log-search" placeholder="过滤 msg…" />
+      </div>
+      <pre id="log-view" class="log-view"></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=5"></script>
+</body>
+</html>

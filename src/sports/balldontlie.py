@@ -74,9 +74,9 @@ class BallDontLieProvider:
             u = self._parse_game(g)
             if u:
                 updates.append(u)
-        if updates:
-            self.store.touch_source(self.source_id)
-            self._last = updates
+        # 请求成功即更新健康状态（当日无 NBA 赛程时也视为正常）
+        self.store.touch_source(self.source_id)
+        self._last = updates
         return updates
 
     def _parse_game(self, g: dict) -> FixtureUpdate | None:

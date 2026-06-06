@@ -12,7 +12,7 @@ from src.net.proxy import ProxyTransport
 
 logger = logging.getLogger("arb.health")
 
-# 交易必需：任一失败则不应发 live 单（nba_api 等可选源失败不暂停交易）
+# 交易必需：任一失败则不应发 live 单（可选源失败不暂停交易）
 CRITICAL_CHECKS = frozenset({"gamma", "clob", "geoblock"})
 
 CHECK_URLS = {
@@ -84,16 +84,6 @@ async def run_health_checks(cfg: AppConfig, proxy: ProxyTransport) -> list[Check
         geoblock_ok = True
         geoblock_detail = f"inconclusive_clob_ok ({geoblock_detail})"
     results.append(CheckResult("geoblock", geoblock_ok, geoblock_detail))
-
-    # nba_api 为可选源（ESPN NBA 兜底），失败仅告警，不参与 live 暂停判定
-    try:
-        from src.sports.nba_api_provider import _fetch_scoreboard_sync
-
-        with proxy.requests_env():
-            games = await asyncio.to_thread(_fetch_scoreboard_sync)
-        results.append(CheckResult("nba_api", True, f"games={len(games)}"))
-    except Exception as e:
-        results.append(CheckResult("nba_api", False, f"optional: {e}"))
 
     await proxy.aclose()
     return results

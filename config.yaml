@@ -70,3 +70,8 @@ espn_soccer_leagues:
 # 本机相对路径（相对项目根目录）
 db_path: "data/arb.db"
 log_path: "logs/arb.jsonl"
+
+# 可视化 Dashboard（http://127.0.0.1:8787）
+dashboard_enabled: true
+dashboard_host: "127.0.0.1"
+dashboard_port: 8787

@@ -210,6 +210,15 @@ class LadderExecutor:
         ok, reason = self.risk.can_trade(market_id)
         if not ok:
             _order_step_log(ctx, step="risk_block", reason=reason)
+            self.store.record_signal_event(
+                market_id=market_id,
+                event_type="risk_block",
+                reason=reason,
+                detail=reason,
+                sport=str(ctx.get("sport", "")),
+                team_a=str(ctx.get("team_a", "")),
+                team_b=str(ctx.get("team_b", "")),
+            )
             return LadderResult(False, 0, 0, "skipped", reason)
 
         if book.best_ask is None:

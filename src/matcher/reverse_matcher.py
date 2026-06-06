@@ -6,10 +6,16 @@ import logging
 import re
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from src.sports.base import FixtureUpdate, SportType
+from src.sports.base import FixtureStatus, FixtureUpdate, SportType
+from src.engine.kickoff_align import (
+    KICKOFF_TOLERANCE_SEC,
+    kickoff_delta_sec,
+    market_is_future,
+    parse_market_kickoff,
+)
 from src.logging_setup import log_event
 from src.store.sqlite import Store
 
@@ -111,41 +117,66 @@ class ReverseMatcher:
         team_b: str | None,
         fixtures: list[FixtureUpdate],
     ) -> str | None:
-        """用当前赛果列表反向匹配市场。"""
+        """用当前赛果列表反向匹配市场（须开球时间对齐，避免同名不同日）。"""
         if not team_a or not team_b:
             return None
         sport_key = "nba" if sport == "nba" else "football"
         ta = normalize_team(team_a, self.store, sport_key)
         tb = normalize_team(team_b, self.store, sport_key)
         expected_type = SportType.NBA if sport == "nba" else SportType.FOOTBALL
+        row = self.store.get_market(market_id)
+        market_ko = parse_market_kickoff(row)
+        now = datetime.now(timezone.utc)
+
+        best: FixtureUpdate | None = None
+        best_delta: float | None = None
 
         for f in fixtures:
             if f.sport != expected_type:
                 continue
             fh = normalize_team(f.home_team, self.store, sport_key)
             fa = normalize_team(f.away_team, self.store, sport_key)
-            if teams_match(ta, tb, fh, fa):
-                match_key = f"{sport_key}:{fh}:{fa}"
-                self._market_by_match_key[match_key] = market_id
-                self.store.set_market_mapping(
-                    market_id,
-                    f.fixture_key,
-                    [f.source_id],
-                    watch_state="watching",
-                )
-                log_event(
-                    logger,
-                    "WATCH_ADD",
-                    market_id=market_id,
-                    sport=sport,
-                    team_a=team_a,
-                    team_b=team_b,
-                    match_key=match_key,
-                    fixture_key=f.fixture_key,
-                    source=f.source_id,
-                )
-                return match_key
-        return None
+            if not teams_match(ta, tb, fh, fa):
+                continue
+            # 未来盘不绑定已终局的历史场次（如旧友谊赛 FINAL 污染 6 月 9 日盘）
+            if market_is_future(market_ko, now) and f.status == FixtureStatus.FINAL:
+                continue
+            delta = kickoff_delta_sec(market_ko, f.kickoff_time)
+            if market_ko is not None:
+                if f.kickoff_time is None:
+                    if market_is_future(market_ko, now):
+                        continue
+                elif delta is None or delta > KICKOFF_TOLERANCE_SEC:
+                    continue
+            if best_delta is None or (delta is not None and delta < best_delta):
+                best_delta = delta
+                best = f
+
+        if best is None:
+            return None
+
+        fh = normalize_team(best.home_team, self.store, sport_key)
+        fa = normalize_team(best.away_team, self.store, sport_key)
+        match_key = f"{sport_key}:{fh}:{fa}"
+        self._market_by_match_key[match_key] = market_id
+        self.store.set_market_mapping(
+            market_id,
+            best.fixture_key,
+            [best.source_id],
+            watch_state="watching",
+        )
+        log_event(
+            logger,
+            "WATCH_ADD",
+            market_id=market_id,
+            sport=sport,
+            team_a=team_a,
+            team_b=team_b,
+            match_key=match_key,
+            fixture_key=best.fixture_key,
+            source=best.source_id,
+        )
+        return match_key
 
     def market_id_for_final(self, match_key: str) -> str | None:
         return self._market_by_match_key.get(match_key)

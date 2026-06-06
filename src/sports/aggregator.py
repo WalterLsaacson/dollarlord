@@ -31,6 +31,8 @@ class FinalEvent:
     observed_at: datetime
     home_score: int | None
     away_score: int | None
+    # 赛果源报告的开球时间，用于与 PM game_start_time 对齐
+    kickoff_time: datetime | None = None
 
 
 @dataclass
@@ -93,6 +95,23 @@ class FixtureAggregator:
             prev = self._live.get(key0)
             if prev is None or u.observed_at >= prev.observed_at:
                 self._live[key0] = u
+                from src.dashboard.bus import emit_event
+
+                emit_event(
+                    "fixture.updated",
+                    {
+                        "match_key": key0,
+                        "fixture": {
+                            "home_team": u.home_team,
+                            "away_team": u.away_team,
+                            "home_score": u.home_score,
+                            "away_score": u.away_score,
+                            "status": u.status.value,
+                            "elapsed_minute": u.elapsed_minute,
+                            "period": u.period,
+                        },
+                    },
+                )
 
             if u.status != FixtureStatus.FINAL or not u.winner:
                 continue
@@ -129,6 +148,7 @@ class FixtureAggregator:
                 observed_at=u.observed_at,
                 home_score=u.home_score,
                 away_score=u.away_score,
+                kickoff_time=u.kickoff_time,
             )
             state.first_final = ev
             new_events.append(ev)

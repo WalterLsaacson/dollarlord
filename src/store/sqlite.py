@@ -6,8 +6,26 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+# 北京时间（UTC+8）
+_BJ = timezone(timedelta(hours=8))
+
+
+def format_ts_beijing(ts: float | int | None) -> str:
+    """Unix 时间戳 → 北京时间字符串。"""
+    if ts is None:
+        return "—"
+    try:
+        sec = float(ts)
+    except (TypeError, ValueError):
+        return "—"
+    if sec <= 0:
+        return "—"
+    dt = datetime.fromtimestamp(sec, tz=timezone.utc).astimezone(_BJ)
+    return dt.strftime("%Y/%m/%d %H:%M:%S")
 
 
 @dataclass
@@ -39,6 +57,26 @@ class Store:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
+
+    def _ensure_signal_events_table(self, cur: sqlite3.Cursor) -> None:
+        """迁移：旧库补 signal_events 表。"""
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT,
+                event_type TEXT,
+                reason TEXT,
+                detail TEXT,
+                sport TEXT,
+                team_a TEXT,
+                team_b TEXT,
+                price REAL,
+                created_at REAL
+            )
+            """
+        )
+        self._conn.commit()
 
     def _init_schema(self) -> None:
         cur = self._conn.cursor()
@@ -89,9 +127,22 @@ class Store:
                 last_ok_ts REAL,
                 last_error TEXT
             );
+            CREATE TABLE IF NOT EXISTS signal_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT,
+                event_type TEXT,
+                reason TEXT,
+                detail TEXT,
+                sport TEXT,
+                team_a TEXT,
+                team_b TEXT,
+                price REAL,
+                created_at REAL
+            );
             """
         )
         self._conn.commit()
+        self._ensure_signal_events_table(cur)
 
     def upsert_market(self, row: MarketRow, **extra: Any) -> None:
         """插入或更新市场。"""
@@ -162,6 +213,22 @@ class Store:
         cur.execute("SELECT * FROM markets WHERE watch_state='watching' AND closed=0")
         return cur.fetchall()
 
+    def list_future_watchlist(self, grace_hours: float = 4.0) -> list[sqlite3.Row]:
+        """Dashboard 用：仅返回未开赛或可能仍在进行中的比赛，过滤历史场次。"""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=grace_hours)
+        cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM markets
+            WHERE watch_state='watching' AND closed=0
+              AND (game_start_time IS NULL OR game_start_time >= ?)
+            ORDER BY game_start_time ASC
+            """,
+            (cutoff_iso,),
+        )
+        return cur.fetchall()
+
     def get_market(self, market_id: str) -> sqlite3.Row | None:
         cur = self._conn.cursor()
         cur.execute("SELECT * FROM markets WHERE market_id=?", (market_id,))
@@ -178,6 +245,10 @@ class Store:
 
     def set_watch_state(self, market_id: str, state: str, winner_side: str | None = None) -> None:
         cur = self._conn.cursor()
+        had_trade = False
+        if state == "done":
+            cur.execute("SELECT COUNT(*) AS c FROM trades WHERE market_id=?", (market_id,))
+            had_trade = int(cur.fetchone()["c"]) > 0
         if winner_side:
             cur.execute(
                 "UPDATE markets SET watch_state=?, winner_side=?, updated_at=? WHERE market_id=?",
@@ -189,6 +260,20 @@ class Store:
                 (state, time.time(), market_id),
             )
         self._conn.commit()
+        # 终局无成交 → 记入错过历史
+        if state == "done" and not had_trade:
+            row = self.get_market(market_id)
+            if row:
+                self.record_signal_event(
+                    market_id=market_id,
+                    event_type="done_no_trade",
+                    reason="done_no_trade",
+                    detail="比赛已结束但未成交",
+                    sport=str(row["sport"] or ""),
+                    team_a=str(row["team_a"] or ""),
+                    team_b=str(row["team_b"] or ""),
+                    price=0.0,
+                )
 
     def add_team_alias(self, alias: str, canonical: str, sport: str) -> None:
         cur = self._conn.cursor()
@@ -230,16 +315,157 @@ class Store:
         price: float,
         status: str,
         detail: str = "",
-    ) -> None:
+    ) -> int:
         cur = self._conn.cursor()
+        row = self.get_market(market_id)
+        ts = time.time()
         cur.execute(
             """
             INSERT INTO trades (market_id, mode, notional_usd, price, status, detail, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (market_id, mode, notional_usd, price, status, detail, time.time()),
+            (market_id, mode, notional_usd, price, status, detail, ts),
         )
         self._conn.commit()
+        trade_id = int(cur.lastrowid)
+        from src.dashboard.bus import emit_event
+
+        emit_event(
+            "history.new",
+            {
+                "kind": "success",
+                "id": trade_id,
+                "market_id": market_id,
+                "event_type": "trade",
+                "reason": status,
+                "detail": detail,
+                "sport": str(row["sport"] if row else ""),
+                "team_a": str(row["team_a"] if row else ""),
+                "team_b": str(row["team_b"] if row else ""),
+                "question": str(row["question"] if row else ""),
+                "price": price,
+                "notional_usd": notional_usd,
+                "created_at": ts,
+                "created_at_display": format_ts_beijing(ts),
+            },
+        )
+        return trade_id
+
+    def record_signal_event(
+        self,
+        *,
+        market_id: str,
+        event_type: str,
+        reason: str,
+        detail: str = "",
+        sport: str = "",
+        team_a: str = "",
+        team_b: str = "",
+        price: float = 0.0,
+    ) -> int:
+        """持久化策略跳过/未成交事件，并推送 dashboard。"""
+        cur = self._conn.cursor()
+        ts = time.time()
+        cur.execute(
+            """
+            INSERT INTO signal_events
+            (market_id, event_type, reason, detail, sport, team_a, team_b, price, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (market_id, event_type, reason, detail, sport, team_a, team_b, price, ts),
+        )
+        self._conn.commit()
+        event_id = int(cur.lastrowid)
+        row = self.get_market(market_id)
+        from src.dashboard.bus import emit_event
+
+        emit_event(
+            "history.new",
+            {
+                "kind": "missed",
+                "id": event_id,
+                "market_id": market_id,
+                "event_type": event_type,
+                "reason": reason,
+                "detail": detail,
+                "sport": sport or str(row["sport"] if row else ""),
+                "team_a": team_a or str(row["team_a"] if row else ""),
+                "team_b": team_b or str(row["team_b"] if row else ""),
+                "question": str(row["question"] if row else ""),
+                "price": price,
+                "created_at": ts,
+                "created_at_display": format_ts_beijing(ts),
+            },
+        )
+        return event_id
+
+    def list_trades(self, limit: int = 5, offset: int = 0) -> list[sqlite3.Row]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT t.*, m.question, m.team_a, m.team_b, m.sport
+            FROM trades t
+            LEFT JOIN markets m ON m.market_id = t.market_id
+            ORDER BY t.created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        return cur.fetchall()
+
+    def count_trades(self) -> int:
+        cur = self._conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM trades")
+        return int(cur.fetchone()["c"])
+
+    def list_signal_events(self, limit: int = 5, offset: int = 0) -> list[sqlite3.Row]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT s.*, m.question
+            FROM signal_events s
+            LEFT JOIN markets m ON m.market_id = s.market_id
+            ORDER BY s.created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        return cur.fetchall()
+
+    def count_signal_events(self) -> int:
+        cur = self._conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM signal_events")
+        return int(cur.fetchone()["c"])
+
+    def list_merged_history(self, page: int = 1, page_size: int = 5) -> tuple[list[dict], int]:
+        """合并成交与错过记录，按时间倒序分页。"""
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT 'success' AS kind, t.id, t.market_id, t.mode, t.notional_usd, t.price,
+                   t.status AS reason, t.detail, t.created_at,
+                   m.question, m.team_a, m.team_b, m.sport, 'trade' AS event_type
+            FROM trades t
+            LEFT JOIN markets m ON m.market_id = t.market_id
+            UNION ALL
+            SELECT 'missed' AS kind, s.id, s.market_id, NULL, NULL, s.price,
+                   s.reason, s.detail, s.created_at,
+                   m.question, s.team_a, s.team_b, s.sport, s.event_type
+            FROM signal_events s
+            LEFT JOIN markets m ON m.market_id = s.market_id
+            ORDER BY created_at DESC
+            """
+        )
+        rows = cur.fetchall()
+        total = len(rows)
+        offset = (page - 1) * page_size
+        page_rows = rows[offset : offset + page_size]
+        items: list[dict] = []
+        for r in page_rows:
+            item = dict(r)
+            item["created_at_display"] = format_ts_beijing(item.get("created_at"))
+            items.append(item)
+        return items, total
 
     def count_trades_today(self) -> int:
         cur = self._conn.cursor()
@@ -249,6 +475,7 @@ class Store:
 
     def touch_source(self, source_id: str, error: str | None = None) -> None:
         cur = self._conn.cursor()
+        ts = time.time()
         if error:
             cur.execute(
                 """
@@ -258,6 +485,7 @@ class Store:
                 """,
                 (source_id, error),
             )
+            ok = False
         else:
             cur.execute(
                 """
@@ -265,9 +493,28 @@ class Store:
                 VALUES (?, ?, NULL)
                 ON CONFLICT(source_id) DO UPDATE SET last_ok_ts=excluded.last_ok_ts, last_error=NULL
                 """,
-                (source_id, time.time()),
+                (source_id, ts),
             )
+            ok = True
         self._conn.commit()
+        from src.dashboard.bus import emit_event
+
+        emit_event(
+            "source.health",
+            {
+                "id": source_id,
+                "ok": ok,
+                "status": "ok" if ok else "error",
+                "last_ts": ts if ok else 0,
+                "error": error or "",
+            },
+        )
+
+    def list_source_health(self) -> list[sqlite3.Row]:
+        """全部数据源健康快照。"""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM source_health ORDER BY source_id")
+        return cur.fetchall()
 
     def close(self) -> None:
         self._conn.close()

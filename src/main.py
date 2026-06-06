@@ -28,7 +28,6 @@ from src.sports.balldontlie import BallDontLieProvider
 from src.sports.espn_nba import EspnNbaProvider
 from src.sports.espn_soccer import EspnSoccerProvider
 from src.sports.football_data import FootballDataProvider
-from src.sports.nba_api_provider import NbaApiProvider
 from src.sports.openligadb import OpenLigaDbProvider
 from src.sports.thesportsdb import TheSportsDbProvider
 from src.store.sqlite import Store
@@ -66,7 +65,6 @@ class ArbApp:
             "espn_soccer": AsyncRateLimiter(cfg.rate_espn_per_min, 60.0, "espn_soccer"),
             "espn_nba": AsyncRateLimiter(cfg.rate_espn_per_min, 60.0, "espn_nba"),
             "openligadb": AsyncRateLimiter(cfg.rate_openligadb_per_min, 60.0, "openligadb"),
-            "nba_api": AsyncRateLimiter(cfg.rate_nba_api_per_min, 60.0, "nba_api"),
         }
 
         # ---- 足球数据源（全部接入，各自限流）----
@@ -76,8 +74,7 @@ class ArbApp:
         self.api_football = ApiFootballProvider(cfg, self.proxy, self.store, self.limiters["api_football"])
         self.thesportsdb = TheSportsDbProvider(cfg, self.proxy, self.store, self.limiters["thesportsdb"])
 
-        # ---- NBA 数据源 ----
-        self.nba_api = NbaApiProvider(self.proxy, self.store, self.limiters["nba_api"])
+        # ---- NBA 数据源（nba_api 已移除，ESPN + BallDontLie 兜底）----
         self.espn_nba = EspnNbaProvider(self.proxy, self.store, self.limiters["espn_nba"])
         self.balldontlie = BallDontLieProvider(cfg, self.proxy, self.store, self.limiters["balldontlie"])
 
@@ -91,12 +88,14 @@ class ArbApp:
         ]
         self.nba_sources = [
             self.espn_nba,
-            self.nba_api,
             self.balldontlie,
         ]
 
         self._stop = asyncio.Event()
         self._has_live_fixtures = False
+        self._config_path = "config.yaml"
+        self._dashboard_hub = None
+        self._last_watchlist_count = 0
 
     async def _fetch_all_fixtures(self) -> list:
         """汇总所有已启用数据源的最新赛事更新（各源内部已限流）。"""
@@ -123,6 +122,7 @@ class ArbApp:
         # 终局信号 + 盘口高频回调（直播价格触发）
         self.aggregator.on_final(self.signals.on_final)
         self.books.on_update(self.signals.on_book_update)
+        self.books.on_update(self._on_book_dashboard)
 
         tasks = [
             asyncio.create_task(self._gamma_sync_loop(), name="gamma_sync"),
@@ -132,6 +132,35 @@ class ArbApp:
         ]
         # WS 与 REST 轮询并行，WS 失败时 REST 仍可用
         tasks.append(asyncio.create_task(self._clob_ws_loop(), name="clob_ws"))
+
+        if self.cfg.dashboard_enabled:
+            from src.dashboard.bus import DashboardBus, set_bus
+            from src.dashboard.hub import DashboardHub
+            from src.dashboard.log_handler import DashboardLogHandler
+            from src.dashboard.server import run_dashboard_server
+
+            bus = DashboardBus()
+            set_bus(bus)
+            bus.start()
+            hub = DashboardHub(self)
+            self._dashboard_hub = hub
+            bus.subscribe(hub.handle_event)
+
+            root_logger = logging.getLogger("arb")
+            dash_handler = DashboardLogHandler()
+            dash_handler.setLevel(logging.INFO)
+            root_logger.addHandler(dash_handler)
+
+            tasks.append(
+                asyncio.create_task(
+                    run_dashboard_server(hub, self.cfg.dashboard_host, self.cfg.dashboard_port),
+                    name="dashboard",
+                )
+            )
+            from src.dashboard.bus import emit_event
+
+            emit_event("status.updated", {})
+            self._emit_initial_source_health()
 
         log_event(
             logger,
@@ -150,6 +179,83 @@ class ArbApp:
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def _emit_initial_source_health(self) -> None:
+        """Dashboard 启动时推送各数据源初始状态（未配置 Key 的显示为 disabled）。"""
+        from src.dashboard.bus import emit_event
+
+        providers = [
+            self.espn_soccer,
+            self.openligadb,
+            self.football_data,
+            self.api_football,
+            self.thesportsdb,
+            self.espn_nba,
+            self.balldontlie,
+        ]
+        for src in providers:
+            sid = src.source_id
+            if hasattr(src, "enabled") and not src.enabled:
+                emit_event(
+                    "source.health",
+                    {
+                        "id": sid,
+                        "ok": None,
+                        "status": "disabled",
+                        "last_ts": 0,
+                        "error": "未配置 API Key，已跳过",
+                    },
+                )
+                continue
+            row = next(
+                (r for r in self.store.list_source_health() if r["source_id"] == sid),
+                None,
+            )
+            if row:
+                ok = bool(row["last_ok_ts"]) and not row["last_error"]
+                emit_event(
+                    "source.health",
+                    {
+                        "id": sid,
+                        "ok": ok,
+                        "status": "ok" if ok else "error",
+                        "last_ts": row["last_ok_ts"] or 0,
+                        "error": row["last_error"] or "",
+                    },
+                )
+            else:
+                emit_event(
+                    "source.health",
+                    {
+                        "id": sid,
+                        "ok": None,
+                        "status": "pending",
+                        "last_ts": 0,
+                        "error": "等待首次拉取",
+                    },
+                )
+
+    async def _on_book_dashboard(self, token_id: str, snap: Any) -> None:
+        """盘口更新时推送 dashboard（与 signals 并行）。"""
+        from src.dashboard.bus import emit_event
+
+        emit_event(
+            "book.updated",
+            {
+                "token_id": token_id,
+                "best_ask": snap.best_ask,
+                "best_ask_size": snap.best_ask_size,
+            },
+        )
+
+    def _maybe_emit_watchlist_changed(self) -> None:
+        wl = self.store.list_active_watchlist()
+        count = len(wl)
+        if count != self._last_watchlist_count:
+            self._last_watchlist_count = count
+            from src.dashboard.bus import emit_event
+
+            emit_event("watchlist.changed", {"page": 1})
 
     async def _gamma_sync_loop(self) -> None:
         while not self._stop.is_set():
@@ -180,6 +286,7 @@ class ArbApp:
                 # 注意：不再一次性订阅全部 watchlist token。
                 # 仅在比赛进入早进场阶段（足球 80 分钟后/NBA 第四节）时，
                 # 由 SignalEngine 动态订阅该市场两侧 token 做高频盘口轮询。
+                self._maybe_emit_watchlist_changed()
             except Exception as e:
                 logger.exception("gamma_sync 异常: %s", e)
             await asyncio.sleep(self.cfg.gamma_sync_interval_sec)
@@ -264,15 +371,56 @@ class ArbApp:
                 geo = next((r for r in results if r.name == "geoblock"), None)
                 if geo is not None:
                     self.risk.set_geoblocked(not geo.ok, geo.detail)
-                # 仅 gamma/clob 挂掉时暂停 live；nba_api 失败不再误暂停
+                # 仅 gamma/clob 挂掉时暂停 live
                 clob_down = any(r.name in ("gamma", "clob") for r in crit)
                 if self.cfg.mode == "live" and clob_down:
                     self.risk._live_paused = True
                 elif self.cfg.mode == "live" and not crit:
                     self.risk.reset_pause()
+
+                from src.dashboard.bus import emit_event
+
+                critical_items = []
+                for r in results:
+                    if r.name in ("gamma", "clob", "geoblock", "espn_nba", "espn_soccer", "openligadb"):
+                        critical_items.append(
+                            {
+                                "id": r.name,
+                                "ok": r.ok,
+                                "last_ts": __import__("time").time(),
+                                "error": r.detail if not r.ok else "",
+                            }
+                        )
+                emit_event("health.critical", {"items": critical_items})
+
+                if self.cfg.mode == "live":
+                    await self._probe_payment_api()
+
             except Exception as e:
                 logger.warning("health 检查异常: %s", e)
             await asyncio.sleep(self.cfg.health_interval_sec)
+
+    async def _probe_payment_api(self) -> None:
+        """live 模式下探测 CLOB 支付 API 可用性。"""
+        import time
+
+        from src.dashboard.bus import emit_event
+
+        detail = ""
+        ok = False
+        try:
+            if self.ladder._init_live_client():
+                bal = self.ladder._get_available_usdc()
+                ok = bal is not None
+                detail = f"usdc={bal:.2f}" if bal is not None else "balance_ok"
+            else:
+                detail = "client_not_ready"
+        except Exception as e:
+            detail = str(e)[:200]
+        payload = {"ok": ok, "detail": detail, "last_ts": time.time()}
+        if self._dashboard_hub:
+            self._dashboard_hub._payment_api = payload
+        emit_event("payment.api", payload)
 
 
 async def run_app(config_path: str) -> None:
@@ -303,6 +451,7 @@ async def run_app(config_path: str) -> None:
             logger.error("大陆环境请确认 127.0.0.1:1080 代理已开启")
 
     app = ArbApp(cfg)
+    app._config_path = str(config_path)
     if geo is not None:
         app.risk.set_geoblocked(not geo.ok, geo.detail)
 

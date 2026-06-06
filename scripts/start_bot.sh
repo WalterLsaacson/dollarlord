@@ -28,3 +28,4 @@ if ! kill -0 "$BPID" 2>/dev/null; then
 fi
 echo "已启动 live bot，PID=$(cat "$PID_FILE")，配置=$CONFIG"
 echo "日志: logs/arb.jsonl 与 $LOG_FILE"
+echo "Dashboard: http://127.0.0.1:8787 （需在 config 中 dashboard_enabled: true）"

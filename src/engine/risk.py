@@ -41,6 +41,16 @@ class RiskManager:
         elif not blocked and self._geoblocked:
             logger.info("CLOB 地区限制已解除，可恢复下单")
         self._geoblocked = blocked
+        from src.dashboard.bus import emit_event
+
+        emit_event(
+            "risk.updated",
+            {
+                "geoblocked": self._geoblocked,
+                "live_paused": self._live_paused,
+                "reason": reason,
+            },
+        )
 
     def can_trade(self, market_id: str) -> tuple[bool, str]:
         """是否允许对某市场下单。"""
@@ -69,7 +79,29 @@ class RiskManager:
                 "连续失败 %d 次，暂停 live 下单",
                 self._consecutive_failures,
             )
+            from src.dashboard.bus import emit_event
+
+            emit_event(
+                "risk.updated",
+                {
+                    "geoblocked": self._geoblocked,
+                    "live_paused": self._live_paused,
+                    "reason": "consecutive_failures",
+                },
+            )
 
     def reset_pause(self) -> None:
+        was_paused = self._live_paused
         self._live_paused = False
         self._consecutive_failures = 0
+        if was_paused:
+            from src.dashboard.bus import emit_event
+
+            emit_event(
+                "risk.updated",
+                {
+                    "geoblocked": self._geoblocked,
+                    "live_paused": False,
+                    "reason": "recovered",
+                },
+            )

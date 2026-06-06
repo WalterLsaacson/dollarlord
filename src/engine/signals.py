@@ -6,6 +6,13 @@ import logging
 from typing import Any
 
 from src.config import AppConfig
+from src.engine.kickoff_align import (
+    final_allowed_for_market,
+    kickoff_delta_sec,
+    kickoffs_aligned,
+    parse_market_kickoff,
+    pick_market_by_kickoff,
+)
 from src.engine.ladder_executor import LadderExecutor
 from src.logging_setup import log_event
 from src.matcher.reverse_matcher import ReverseMatcher, normalize_team, teams_match
@@ -46,6 +53,38 @@ class SignalEngine:
         self._armed_tokens: dict[str, str] = {}
         # 正在执行直播下单的市场，避免同一盘口多次回调重复下单
         self._live_processing: set[str] = set()
+
+    def _record_skip(
+        self,
+        market_id: str,
+        reason: str,
+        detail: str = "",
+        *,
+        sport: str = "",
+        team_a: str = "",
+        team_b: str = "",
+        price: float = 0.0,
+        event_type: str = "skip",
+    ) -> None:
+        """写入错过记录并供 Dashboard 展示。"""
+        if not market_id:
+            return
+        self.store.record_signal_event(
+            market_id=market_id,
+            event_type=event_type,
+            reason=reason,
+            detail=detail,
+            sport=sport,
+            team_a=team_a,
+            team_b=team_b,
+            price=price,
+        )
+
+    def _emit_armed(self, market_id: str, armed: bool) -> None:
+        from src.dashboard.bus import emit_event
+
+        emit_event("watchlist.armed", {"market_id": market_id, "armed": armed})
+        emit_event("status.updated", {})
 
     def _base_ctx(self, row: Any, ev: FinalEvent) -> dict[str, Any]:
         """策略日志公共字段。"""
@@ -89,9 +128,7 @@ class SignalEngine:
             )
             return
 
-        market_id = self.matcher.market_id_for_final(ev.match_key)
-        if not market_id:
-            market_id = self._find_market_by_teams(ev)
+        market_id = self._resolve_market_for_final(ev)
         if not market_id:
             return
 
@@ -104,13 +141,51 @@ class SignalEngine:
         finally:
             self._processing.discard(market_id)
 
-    def _find_market_by_teams(self, ev: FinalEvent) -> str | None:
-        return self._match_market(ev.sport.value, ev.home_team, ev.away_team)
+    def _resolve_market_for_final(self, ev: FinalEvent) -> str | None:
+        """终局事件 → 市场 id：先 match_key，再校验开球，否则按队名+开球重选。"""
+        candidates: list[str] = []
+        mid = self.matcher.market_id_for_final(ev.match_key)
+        if mid:
+            candidates.append(mid)
+        matched = self._match_market(
+            ev.sport.value, ev.home_team, ev.away_team, ev.kickoff_time
+        )
+        if matched and matched not in candidates:
+            candidates.append(matched)
 
-    def _match_market(self, sport_value: str, home: str, away: str) -> str | None:
-        """按运动+队名在 watchlist 中反查市场 id。"""
+        for market_id in candidates:
+            row = self.store.get_market(market_id)
+            ok, reason = final_allowed_for_market(
+                row,
+                fixture_kickoff=ev.kickoff_time,
+                observed_at=ev.observed_at,
+            )
+            if ok:
+                return market_id
+            log_event(
+                logger,
+                "STRATEGY_SKIP",
+                reason=reason,
+                market_id=market_id,
+                match_key=ev.match_key,
+                home_team=ev.home_team,
+                away_team=ev.away_team,
+                game_start_time=row["game_start_time"] if row else None,
+                fixture_kickoff=ev.kickoff_time.isoformat() if ev.kickoff_time else None,
+            )
+        return None
+
+    def _match_market(
+        self,
+        sport_value: str,
+        home: str,
+        away: str,
+        kickoff: Any = None,
+    ) -> str | None:
+        """按运动+队名在 watchlist 中反查市场 id；多场同名时按开球时间择优。"""
         rows = self.store.list_active_watchlist()
         sport = "nba" if sport_value == "nba" else "football"
+        candidates = []
         for row in rows:
             if row["sport"] != sport:
                 continue
@@ -119,8 +194,9 @@ class SignalEngine:
             eh = normalize_team(home, self.store, sport)
             ea = normalize_team(away, self.store, sport)
             if teams_match(ta, tb, eh, ea):
-                return row["market_id"]
-        return None
+                candidates.append(row)
+        picked = pick_market_by_kickoff(candidates, kickoff)
+        return picked["market_id"] if picked else None
 
     # ---------------------------------------------------------------------
     # 价格驱动早进场（直播）：不等 final，比赛后段一旦某一方价格突破阈值即买入
@@ -136,7 +212,9 @@ class SignalEngine:
         for f in fixtures:
             if not self.aggregator.is_eligible_for_early_entry(f):
                 continue
-            market_id = self._match_market(f.sport.value, f.home_team, f.away_team)
+            market_id = self._match_market(
+                f.sport.value, f.home_team, f.away_team, f.kickoff_time
+            )
             if not market_id or market_id in self._armed:
                 continue
             self._arm_market(market_id, f)
@@ -156,6 +234,10 @@ class SignalEngine:
         uma = (row["uma_status"] or "").lower()
         if uma in UMA_BLOCK:
             return
+        # 武装前校验开球，避免旧 LIVE 场次污染未来同名盘
+        market_ko = parse_market_kickoff(row)
+        if market_ko and f.kickoff_time and not kickoffs_aligned(market_ko, f.kickoff_time):
+            return
         token_yes = row["token_yes"]
         token_no = row["token_no"]
         if not token_yes or not token_no:
@@ -173,6 +255,7 @@ class SignalEngine:
         self._armed_tokens[token_no] = market_id
         self.books.subscribe(token_yes)
         self.books.subscribe(token_no)
+        self._emit_armed(market_id, True)
         log_event(
             logger,
             "STRATEGY_LIVE_ARM",
@@ -201,6 +284,7 @@ class SignalEngine:
             if tk and self._armed_tokens.get(tk) == market_id:
                 self._armed_tokens.pop(tk, None)
                 self.books.unsubscribe(tk)
+        self._emit_armed(market_id, False)
 
     async def on_book_update(self, token_id: str, snap: OrderbookSnapshot) -> None:
         """盘口更新回调：直播阶段一旦价格落入买入窗口立即下单。"""
@@ -239,20 +323,35 @@ class SignalEngine:
         sport = SportType.NBA if row["sport"] == "nba" else SportType.FOOTBALL
         ta = str(row["team_a"] or "")
         tb = str(row["team_b"] or "")
+        sp = row["sport"]
+        market_ko = parse_market_kickoff(row)
+        matched: list[FixtureUpdate] = []
         for f in self.aggregator.live_fixtures():
             if f.sport != sport:
                 continue
-            from src.matcher.reverse_matcher import normalize_team, teams_match
-
-            sp = row["sport"]
             if teams_match(
                 normalize_team(ta, self.store, sp),
                 normalize_team(tb, self.store, sp),
                 normalize_team(f.home_team, self.store, sp),
                 normalize_team(f.away_team, self.store, sp),
             ):
-                return f
-        return None
+                matched.append(f)
+        if not matched:
+            return None
+        if len(matched) == 1:
+            return matched[0]
+        if market_ko is None:
+            return matched[0]
+        best: FixtureUpdate | None = None
+        best_delta: float | None = None
+        for f in matched:
+            delta = kickoff_delta_sec(market_ko, f.kickoff_time)
+            if delta is None:
+                continue
+            if best_delta is None or delta < best_delta:
+                best_delta = delta
+                best = f
+        return best
 
     def _token_is_leading_side(self, row: Any, token_id: str) -> bool:
         """直播早进场只买领先方 token，避免买 0.001 的输家侧。"""
@@ -318,6 +417,16 @@ class SignalEngine:
                 **ctx,
             )
         else:
+            self._record_skip(
+                market_id,
+                result.status,
+                result.detail or "",
+                sport=str(ctx.get("sport", "")),
+                team_a=str(ctx.get("team_a", "")),
+                team_b=str(ctx.get("team_b", "")),
+                price=float(result.price or 0),
+                event_type="order_not_filled",
+            )
             log_event(
                 logger,
                 "STRATEGY_ORDER",
@@ -343,12 +452,44 @@ class SignalEngine:
         ctx = self._base_ctx(row, ev)
         log_event(logger, "STRATEGY_EVAL", action="final_received", **ctx)
 
+        ok, kickoff_reason = final_allowed_for_market(
+            row,
+            fixture_kickoff=ev.kickoff_time,
+            observed_at=ev.observed_at,
+        )
+        if not ok:
+            log_event(
+                logger,
+                "STRATEGY_SKIP",
+                reason=kickoff_reason,
+                game_start_time=row["game_start_time"],
+                fixture_kickoff=ev.kickoff_time.isoformat() if ev.kickoff_time else None,
+                **ctx,
+            )
+            self._record_skip(
+                market_id,
+                kickoff_reason,
+                str(row["game_start_time"] or ""),
+                sport=ctx["sport"],
+                team_a=str(ctx["team_a"]),
+                team_b=str(ctx["team_b"]),
+            )
+            return
+
         uma = (row["uma_status"] or "").lower()
         if uma in UMA_BLOCK:
             log_event(logger, "STRATEGY_SKIP", reason="uma_resolved_or_disputed", uma_status=uma, **ctx)
+            self._record_skip(
+                market_id, "uma_resolved_or_disputed", uma or "", sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+            )
             return
         if row["closed"]:
             log_event(logger, "STRATEGY_SKIP", reason="market_closed", **ctx)
+            self._record_skip(
+                market_id, "market_closed", "", sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+            )
             return
 
         side = self.matcher.winner_token_side(
@@ -357,6 +498,10 @@ class SignalEngine:
         if not side:
             # ctx 已含 winner，勿重复传参（否则会触发 log_event TypeError）
             log_event(logger, "STRATEGY_SKIP", reason="draw_or_unknown_winner_token", **ctx)
+            self._record_skip(
+                market_id, "draw_or_unknown_winner_token", "", sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+            )
             return
 
         token_id = row["token_yes"] if side == "yes" else row["token_no"]
@@ -368,6 +513,10 @@ class SignalEngine:
             book = await self.books.fetch_book_rest(token_id)
         except Exception as e:
             log_event(logger, "STRATEGY_SKIP", reason="orderbook_fetch_failed", error=str(e), **ctx)
+            self._record_skip(
+                market_id, "orderbook_fetch_failed", str(e), sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+            )
             return
 
         book_fields = self._book_ctx(book)
@@ -381,6 +530,11 @@ class SignalEngine:
                 detail="订单簿无卖单",
                 **ctx,
             )
+            self._record_skip(
+                market_id, "no_ask", "订单簿无卖单", sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+                price=float(book.best_ask or 0),
+            )
             return
 
         if book.best_ask < 0.01:
@@ -390,6 +544,11 @@ class SignalEngine:
                 reason="ask_too_low",
                 detail=f"ask={book.best_ask} 低于 CLOB 最小价 0.01，疑似输家 token",
                 **ctx,
+            )
+            self._record_skip(
+                market_id, "ask_too_low", ctx.get("detail", ""), sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+                price=float(book.best_ask or 0), event_type="skip",
             )
             return
 
@@ -401,6 +560,11 @@ class SignalEngine:
                 detail=f"ask={book.best_ask} > max={self.cfg.entry_max_price}，未下单",
                 **ctx,
             )
+            self._record_skip(
+                market_id, "ask_above_max", f"ask={book.best_ask}", sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+                price=float(book.best_ask or 0), event_type="skip",
+            )
             return
 
         if book.best_ask < self.cfg.early_entry_price:
@@ -410,6 +574,11 @@ class SignalEngine:
                 reason="ask_below_min",
                 detail=f"ask={book.best_ask} < min={self.cfg.early_entry_price}，未下单",
                 **ctx,
+            )
+            self._record_skip(
+                market_id, "ask_below_min", f"ask={book.best_ask}", sport=ctx["sport"],
+                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
+                price=float(book.best_ask or 0), event_type="skip",
             )
             return
 
@@ -430,6 +599,16 @@ class SignalEngine:
                 **ctx,
             )
         else:
+            self._record_skip(
+                market_id,
+                result.status,
+                result.detail or "",
+                sport=str(ctx.get("sport", "")),
+                team_a=str(ctx.get("team_a", "")),
+                team_b=str(ctx.get("team_b", "")),
+                price=float(result.price or 0),
+                event_type="order_not_filled",
+            )
             log_event(
                 logger,
                 "STRATEGY_ORDER",
