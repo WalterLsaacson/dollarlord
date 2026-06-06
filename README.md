@@ -1,51 +1,46 @@
 # Polymarket 体育赛事结算延迟套利 Bot
 
-在体育赛事**官方终局**后、Polymarket **UMA 正式 resolve** 前，若胜方 outcome token 的卖价仍低于阈值（如 $0.98），则自动分级 FOK 买入，待 resolve 后 redeem。
+在体育赛事**官方终局**后、Polymarket **UMA 正式 resolve** 前，若胜方 outcome token 的卖价仍低于阈值（如 $0.99），则自动分级 FOK 买入，待 resolve 后 redeem。
+
+**详细使用说明（启动/停止/配置/成交错过原因）见 [docs/USER_GUIDE.zh.md](docs/USER_GUIDE.zh.md)。**
 
 ## 功能概览
 
-- **全自动**：Gamma 发现足球/NBA 盘口 → 免费多源赛果反向匹配 → 终局信号 → 分级下单
-- **多源竞速**：`nba_api`、ESPN NBA、ESPN 足球、OpenLigaDB 并行，取最快终局；冲突熔断
-- **分级下单**：按 `max_round_notional_usd` 与盘口深度逐级尝试 FOK（50→25→10→5）
+- **全自动**：Gamma 发现足球/NBA 盘口 → 免费多源赛果反向匹配 → 终局 / 直播信号 → 分级下单
+- **多源竞速**：ESPN、OpenLigaDB、football-data、API-Football、BallDontLie 等并行，取最快终局；冲突熔断
+- **开球校验**：同名不同日场次按 `game_start_time` 对齐，避免旧赛果误触发未来盘
+- **分级下单**：按 `max_round_notional_usd` 与盘口深度逐级尝试 FOK
+- **Dashboard**：内嵌 Web UI（`http://127.0.0.1:8787`），Watchlist / 成交错过 / 启停控制
 - **双环境**：大陆本地代理测试 / 伦敦 VPS 直连生产
 - **模式**：`paper`（模拟）/ `live`（真金）
-- **7×24**：`systemd` 常驻 + 健康检查 + SQLite 状态恢复
 
 ## 快速开始（大陆本地）
 
 ### 1. 依赖
 
 ```bash
-cd ~/projects/polymarket-settlement-arb
+cd polymarket-settlement-arb
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-# live 真金需额外：
-pip install -e ".[live]"
+pip install -e ".[live]"   # live 真金
+cp .env.example polymarket-arb.env   # 编辑 PK / API Key
 ```
 
-### 2. 代理
-
-确保本地代理监听 `127.0.0.1:1080`（HTTP + SOCKS5），使用 `config.local.yaml`：
-
-```yaml
-proxy:
-  enabled: true
-  socks5_url: "socks5://127.0.0.1:1080"
-  http_url: "http://127.0.0.1:1080"
-mode: paper
-```
-
-### 3. 连通性检查
+### 2. 启动
 
 ```bash
-python -m src.health config.local.yaml
+./scripts/start_bot.sh          # 后台运行，默认 config.yaml
+# Dashboard: http://127.0.0.1:8787
+./scripts/stop_bot.sh           # 停止
 ```
 
-### 4. 启动 bot
+代理默认 `127.0.0.1:1082`（Shadowrocket），见 `config.yaml` 中 `proxy` 段。
+
+### 3. 健康检查
 
 ```bash
-python -m src.main --config config.local.yaml
+python -m src.health config.yaml
 ```
 
 日志：`logs/arb.jsonl`；数据库：`data/arb.db`。
@@ -83,14 +78,15 @@ sudo systemctl enable --now polymarket-arb
 
 ## 配置说明
 
+完整配置项见 **[docs/USER_GUIDE.zh.md](docs/USER_GUIDE.zh.md#3-配置文件说明)**。常用项：
+
 | 参数 | 含义 |
 |------|------|
 | `mode` | `paper` / `live` |
-| `entry_max_price` | 最高买入价（如 0.99） |
+| `entry_max_price` / `early_entry_price` | 买入价窗口上下限 |
 | `max_round_notional_usd` | 每轮最大尝试金额 |
-| `order_ladder_usd` | 分级阶梯（可省略，自动减半） |
-| `gamma_sync_interval_sec` | PM 市场同步间隔（默认 900） |
-| `market_cooldown_sec` | 单市场成交后冷却 |
+| `early_entry_enabled` | 足球后段直播价早进场 |
+| `dashboard_enabled` | 是否启动 Web Dashboard |
 
 ## 队名映射
 
@@ -111,10 +107,12 @@ INSERT INTO team_aliases (alias, canonical, sport) VALUES ('man utd', 'mancheste
 
 ```
 src/main.py           # 7×24 主循环
+src/dashboard/        # Web Dashboard
+src/engine/           # 信号 + 分级下单 + 开球校验
 src/sports/           # 多源赛果
 src/pm/               # Gamma + CLOB
 src/matcher/          # 反向匹配
-src/engine/           # 信号 + 分级下单
+docs/USER_GUIDE.zh.md # 使用指南（中文）
 deploy/               # systemd / healthcheck
 ```
 

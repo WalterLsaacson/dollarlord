@@ -77,6 +77,8 @@ python -m src.main
 
 验证无误后，可将 `mode` 改为 `live`（建议仍走代理）。
 
+完整启停、Dashboard、配置与成交错过说明见 **[docs/USER_GUIDE.zh.md](USER_GUIDE.zh.md)**。
+
 ## 7. 从伦敦服务器单独带走的内容
 
 **不要**从 tar 包里找私钥。请用安全方式（U 盘、密码管理器、加密通道）从服务器拷贝：
