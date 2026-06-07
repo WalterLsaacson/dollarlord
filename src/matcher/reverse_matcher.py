@@ -28,6 +28,8 @@ _STRIP_SUFFIX = re.compile(
 )
 # “Will X win on …?” 盘口：Yes = 题干队 X 赢
 _WILL_WIN = re.compile(r"^will\s+(.+?)\s+win\b", re.I)
+# 「… end in a draw?」专用平局盘
+_DRAW_MARKET = re.compile(r"end in a draw\??\s*$", re.I)
 
 
 def normalize_team(name: str, store: Store, sport: str) -> str:
@@ -178,6 +180,50 @@ class ReverseMatcher:
         )
         return match_key
 
+    def pick_fixture_for_market(
+        self,
+        row: Any,
+        fixtures: list[FixtureUpdate],
+    ) -> FixtureUpdate | None:
+        """按队名 + 开球时间为 PM 市场匹配唯一赛果（Dashboard / 直播用）。"""
+        if row is None:
+            return None
+        team_a = row["team_a"] if hasattr(row, "__getitem__") else None
+        team_b = row["team_b"] if hasattr(row, "__getitem__") else None
+        if not team_a or not team_b:
+            return None
+        sport = str(row["sport"] or "football")
+        sport_key = "nba" if sport == "nba" else "football"
+        expected_type = SportType.NBA if sport == "nba" else SportType.FOOTBALL
+        ta = normalize_team(str(team_a), self.store, sport_key)
+        tb = normalize_team(str(team_b), self.store, sport_key)
+        market_ko = parse_market_kickoff(row)
+        now = datetime.now(timezone.utc)
+
+        best: FixtureUpdate | None = None
+        best_delta: float | None = None
+
+        for f in fixtures:
+            if f.sport != expected_type:
+                continue
+            fh = normalize_team(f.home_team, self.store, sport_key)
+            fa = normalize_team(f.away_team, self.store, sport_key)
+            if not teams_match(ta, tb, fh, fa):
+                continue
+            if market_is_future(market_ko, now) and f.status == FixtureStatus.FINAL:
+                continue
+            delta = kickoff_delta_sec(market_ko, f.kickoff_time)
+            if market_ko is not None:
+                if f.kickoff_time is None:
+                    if market_is_future(market_ko, now):
+                        continue
+                elif delta is None or delta > KICKOFF_TOLERANCE_SEC:
+                    continue
+            if best_delta is None or (delta is not None and delta < best_delta):
+                best_delta = delta
+                best = f
+        return best
+
     def market_id_for_final(self, match_key: str) -> str | None:
         return self._market_by_match_key.get(match_key)
 
@@ -202,15 +248,22 @@ class ReverseMatcher:
         tb = normalize_team(str(team_b), self.store, sport)
 
         if winner == "draw":
-            return None  # MVP 不做平局盘
+            question = str(market_row["question"] or "")
+            # 专用平局盘：终局平局 → 买 Yes
+            if _DRAW_MARKET.search(question):
+                return "yes"
+            # 「Will X win?」：平局 = X 未赢 → 买 No（非跳过）
+            if _WILL_WIN.search(question):
+                return "no"
+            return None
 
+        question = str(market_row["question"] or "")
+        m = _WILL_WIN.search(question)
         # 胜方队名来自外部赛果（主/客），不能假设 PM team_a == 主场
         ht = normalize_team(home_team or str(team_a), self.store, sport)
         at = normalize_team(away_team or str(team_b), self.store, sport)
         winning_norm = ht if winner == "home" else at
 
-        question = str(market_row["question"] or "")
-        m = _WILL_WIN.search(question)
         if m:
             # “Will Guam win?” → Yes=Guam 赢；菲律宾赢则买 No
             subject = normalize_team(m.group(1).strip(), self.store, sport)

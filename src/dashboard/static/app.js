@@ -1,43 +1,26 @@
 /**
- * Dashboard 前端：WebSocket 事件驱动更新，REST 仅用于翻页与重启。
+ * Dashboard 前端：WebSocket 事件驱动更新，REST 用于结算与重启。
  */
 (function () {
-  const WATCHLIST_PAGE_SIZE = 10;
   const BJ_TZ = "Asia/Shanghai";
+  const LOG_MAX_LINES = 2000;
 
   const state = {
-    watchlist: { items: [], total: 0, page: 1, page_size: WATCHLIST_PAGE_SIZE },
-    history: { items: [], total: 0, page: 1, page_size: 5 },
-    positions: { items: [], enabled: false, auto_redeem: false, threshold_pct: 99.8 },
+    watchlist: { items: [], total: 0 },
+    history: { items: [], total: 0 },
+    positions: { items: [], enabled: false, auto_redeem: false, threshold_pct: 100, chain_ok: true },
     health: [],
     focus: null,
     status: {},
     logs: [],
+    logSource: "logs/arb.jsonl",
     geoblocked: false,
   };
 
   let ws = null;
   let reconnectTimer = null;
-  let wlLoading = false;
-  let histLoading = false;
 
   const $ = (id) => document.getElementById(id);
-
-  function setWatchlistLoading(loading) {
-    wlLoading = loading;
-    $("wl-prev").disabled = loading || state.watchlist.page <= 1;
-    const totalPages = Math.max(1, Math.ceil(state.watchlist.total / state.watchlist.page_size));
-    $("wl-next").disabled = loading || state.watchlist.page >= totalPages;
-    $("wl-page-info").classList.toggle("loading", loading);
-  }
-
-  function setHistoryLoading(loading) {
-    histLoading = loading;
-    $("hist-prev").disabled = loading || state.history.page <= 1;
-    const totalPages = Math.max(1, Math.ceil(state.history.total / state.history.page_size));
-    $("hist-next").disabled = loading || state.history.page >= totalPages;
-    $("hist-page-info").classList.toggle("loading", loading);
-  }
 
   function healthDotClass(item) {
     if (item.status === "disabled" || item.status === "pending") return "warn";
@@ -191,6 +174,9 @@
           : fx.period != null
             ? `P${fx.period}`
             : "—";
+      const statusTags = [];
+      if (row.armed) statusTags.push('<span class="tag armed">ARMED</span>');
+      if (row.has_trade) statusTags.push('<span class="tag success">已成交</span>');
       tr.innerHTML = `
         <td>${fmtStart(row.game_start_time)}</td>
         <td>${row.team_a} vs ${row.team_b}</td>
@@ -198,14 +184,10 @@
         <td class="col-prog">${prog}</td>
         <td class="col-yes">${row.yes_ask ?? "—"}</td>
         <td class="col-no">${row.no_ask ?? "—"}</td>
-        <td>${row.armed ? '<span class="tag armed">ARMED</span>' : "—"}</td>`;
+        <td>${statusTags.length ? statusTags.join(" ") : "—"}</td>`;
       tbody.appendChild(tr);
     }
-    const totalPages = Math.max(1, Math.ceil(state.watchlist.total / state.watchlist.page_size));
     $("watchlist-total").textContent = state.watchlist.total;
-    $("wl-page-info").textContent = `${state.watchlist.page} / ${totalPages}`;
-    $("wl-prev").disabled = wlLoading || state.watchlist.page <= 1;
-    $("wl-next").disabled = wlLoading || state.watchlist.page >= totalPages;
   }
 
   function patchWatchlistRows(patches) {
@@ -232,6 +214,12 @@
     }
   }
 
+  function historyMatchup(row) {
+    if (row.question) return row.question;
+    if (row.team_a || row.team_b) return `${row.team_a || ""} vs ${row.team_b || ""}`.trim();
+    return "—";
+  }
+
   function renderHistory() {
     const tbody = $("history-body");
     tbody.innerHTML = "";
@@ -244,28 +232,16 @@
       tr.innerHTML = `
         <td>${fmtHistoryTime(row)}</td>
         <td><span class="tag ${tagClass}">${kind}</span></td>
-        <td>${row.team_a || ""} vs ${row.team_b || ""}</td>
+        <td>${historyMatchup(row)}</td>
         <td title="${row.detail || ""}">${row.reason || row.event_type || ""}</td>
         <td>${row.price != null && row.price ? row.price : row.notional_usd || "—"}</td>`;
       tbody.appendChild(tr);
     }
-    const totalPages = Math.max(1, Math.ceil(state.history.total / state.history.page_size));
     $("history-total").textContent = state.history.total;
-    $("hist-page-info").textContent = `${state.history.page} / ${totalPages}`;
-    $("hist-prev").disabled = state.history.page <= 1;
-    $("hist-next").disabled = state.history.page >= totalPages;
   }
 
   function prependHistory(item) {
-    if (state.history.page !== 1) {
-      state.history.total += 1;
-      $("history-total").textContent = state.history.total;
-      return;
-    }
     state.history.items.unshift(item);
-    if (state.history.items.length > state.history.page_size) {
-      state.history.items.pop();
-    }
     state.history.total += 1;
     renderHistory();
   }
@@ -279,19 +255,26 @@
       hint.textContent = "结算未启用：需 live 模式 + polymarket-arb.env 中 FUNDER/PK，并 pip install -e \".[live]\"";
       return;
     }
-    hint.textContent = `自动结算：${p.auto_redeem ? "开" : "关"} · 触发阈值 ${p.threshold_pct}% · EOA 需有 POL 付 gas`;
+    let hintText = `自动结算：${p.auto_redeem ? "开" : "关"} · 触发阈值 ${p.threshold_pct}% · 仅展示链上真实份额`;
+    if (p.chain_ok === false) {
+      hintText += " · Polygon RPC 不可用，暂不展示持仓";
+    }
+    hint.textContent = hintText;
     for (const row of p.items || []) {
       const tr = document.createElement("tr");
+      const label = row.question || row.title || "—";
       const status = row.already_redeemed
         ? "已结算"
-        : row.is_winner
-          ? "胜方"
-          : row.redeemable
-            ? "可赎回"
-            : "—";
-      const canRedeem = row.redeemable && !row.already_redeemed;
+        : row.can_settle
+          ? "可结算"
+          : row.is_winner
+            ? "胜方"
+            : row.redeemable
+              ? "待定价"
+              : "—";
+      const canRedeem = row.can_settle && !row.already_redeemed;
       tr.innerHTML = `
-        <td title="${escapeHtml(row.title || "")}">${escapeHtml((row.title || "").slice(0, 36))}</td>
+        <td title="${escapeHtml(label)}">${escapeHtml(label.slice(0, 48))}</td>
         <td>${row.size ?? "—"}</td>
         <td>${row.cur_price_pct ?? "—"}</td>
         <td>${status}</td>
@@ -332,8 +315,8 @@
 
   async function redeemBatch(winnersOnly) {
     const msg = winnersOnly
-      ? "结算全部胜方持仓（价格≈100%）？"
-      : "结算全部可赎回持仓（含输家清零）？";
+      ? "结算全部胜方持仓（价格 = 100%）？"
+      : "结算全部可结算持仓（价格 = 100%）？";
     if (!confirm(msg)) return;
     const r = await fetch("/api/redeem", {
       method: "POST",
@@ -369,18 +352,32 @@
     }
   }
 
+  /** 格式化 arb.jsonl 单行 */
+  function formatLogLine(l) {
+    const ts = fmtBeijing(l.ts, true);
+    const { level = "INFO", logger = "arb", msg = "" } = l;
+    const extra = { ...l };
+    delete extra.ts;
+    delete extra.level;
+    delete extra.logger;
+    delete extra.msg;
+    delete extra.exc;
+    const keys = Object.keys(extra);
+    const extraStr = keys.length ? " " + JSON.stringify(extra) : "";
+    return `[${ts}] ${level} ${logger} ${msg}${extraStr}`;
+  }
+
   function renderLogs() {
     const filter = ($("log-search").value || "").toLowerCase();
     const lines = state.logs.filter((l) => {
       if (!filter) return true;
-      return (l.msg || "").toLowerCase().includes(filter);
+      return formatLogLine(l).toLowerCase().includes(filter);
     });
     const view = $("log-view");
     view.innerHTML = lines
       .map((l) => {
         const cls = l.level === "ERROR" ? "error" : l.level === "WARNING" ? "warning" : "";
-        const text = `[${fmtBeijing(l.ts, true)}] ${l.level} ${l.msg || ""}`;
-        return `<div class="log-line ${cls}">${escapeHtml(text)}</div>`;
+        return `<div class="log-line ${cls}">${escapeHtml(formatLogLine(l))}</div>`;
       })
       .join("");
     if ($("log-autoscroll").checked) {
@@ -389,12 +386,14 @@
   }
 
   function escapeHtml(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
   function appendLog(line) {
     state.logs.push(line);
-    if (state.logs.length > 500) state.logs.shift();
+    if (state.logs.length > LOG_MAX_LINES) {
+      state.logs.splice(0, state.logs.length - LOG_MAX_LINES);
+    }
     renderLogs();
   }
 
@@ -402,20 +401,12 @@
     switch (msg.type) {
       case "snapshot.full":
         state.health = msg.health || [];
-        if (msg.watchlist) {
-          state.watchlist = msg.watchlist;
-          // 服务端 page_size 与前端不一致时，主动拉取正确页
-          if (
-            (state.watchlist.page_size || 0) < WATCHLIST_PAGE_SIZE &&
-            state.watchlist.page === 1
-          ) {
-            requestWatchlistPage(1);
-          }
-        }
+        state.watchlist = msg.watchlist || state.watchlist;
         state.history = msg.history || state.history;
         state.focus = msg.focus;
         state.status = msg.status || {};
         state.logs = msg.logs || [];
+        state.logSource = msg.log_source || state.logSource;
         state.geoblocked = !!state.status.geoblocked;
         renderHealth();
         renderFocus();
@@ -453,9 +444,8 @@
         state.focus = msg.data;
         renderFocus();
         break;
-      case "watchlist.page":
+      case "watchlist.full":
         state.watchlist = msg.data;
-        setWatchlistLoading(false);
         renderWatchlist();
         break;
       case "watchlist.patch":
@@ -478,11 +468,6 @@
       }
       case "history.new":
         prependHistory(msg.item);
-        break;
-      case "history.page":
-        state.history = msg.data;
-        setHistoryLoading(false);
-        renderHistory();
         break;
       case "positions.changed":
         loadPositions();
@@ -511,39 +496,6 @@
     };
     ws.onerror = () => ws.close();
   }
-
-  function wsSend(obj) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-    }
-  }
-
-  function requestWatchlistPage(page) {
-    const totalPages = Math.max(1, Math.ceil(state.watchlist.total / state.watchlist.page_size));
-    if (wlLoading || page < 1 || page > totalPages) return;
-    setWatchlistLoading(true);
-    wsSend({ type: "watchlist.page", page, page_size: WATCHLIST_PAGE_SIZE });
-  }
-
-  function requestHistoryPage(page) {
-    const totalPages = Math.max(1, Math.ceil(state.history.total / state.history.page_size));
-    if (histLoading || page < 1 || page > totalPages) return;
-    setHistoryLoading(true);
-    wsSend({ type: "history.page", page });
-  }
-
-  $("wl-prev").addEventListener("click", () => {
-    requestWatchlistPage(state.watchlist.page - 1);
-  });
-  $("wl-next").addEventListener("click", () => {
-    requestWatchlistPage(state.watchlist.page + 1);
-  });
-  $("hist-prev").addEventListener("click", () => {
-    requestHistoryPage(state.history.page - 1);
-  });
-  $("hist-next").addEventListener("click", () => {
-    requestHistoryPage(state.history.page + 1);
-  });
 
   $("btn-start").addEventListener("click", async () => {
     if (!confirm("确认启动 Bot？")) return;

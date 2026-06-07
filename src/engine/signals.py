@@ -319,39 +319,8 @@ class SignalEngine:
             self._live_processing.discard(market_id)
 
     def _live_fixture_for_market(self, row: Any) -> FixtureUpdate | None:
-        """按 PM 对阵在聚合器实时快照中找当前比分。"""
-        sport = SportType.NBA if row["sport"] == "nba" else SportType.FOOTBALL
-        ta = str(row["team_a"] or "")
-        tb = str(row["team_b"] or "")
-        sp = row["sport"]
-        market_ko = parse_market_kickoff(row)
-        matched: list[FixtureUpdate] = []
-        for f in self.aggregator.live_fixtures():
-            if f.sport != sport:
-                continue
-            if teams_match(
-                normalize_team(ta, self.store, sp),
-                normalize_team(tb, self.store, sp),
-                normalize_team(f.home_team, self.store, sp),
-                normalize_team(f.away_team, self.store, sp),
-            ):
-                matched.append(f)
-        if not matched:
-            return None
-        if len(matched) == 1:
-            return matched[0]
-        if market_ko is None:
-            return matched[0]
-        best: FixtureUpdate | None = None
-        best_delta: float | None = None
-        for f in matched:
-            delta = kickoff_delta_sec(market_ko, f.kickoff_time)
-            if delta is None:
-                continue
-            if best_delta is None or delta < best_delta:
-                best_delta = delta
-                best = f
-        return best
+        """按 PM 对阵 + 开球时间在聚合器快照中找当前比分。"""
+        return self.matcher.pick_fixture_for_market(row, self.aggregator.live_fixtures())
 
     def _token_is_leading_side(self, row: Any, token_id: str) -> bool:
         """直播早进场只买领先方 token，避免买 0.001 的输家侧。"""
@@ -496,10 +465,14 @@ class SignalEngine:
             row, ev.winner, home_team=ev.home_team, away_team=ev.away_team
         )
         if not side:
-            # ctx 已含 winner，勿重复传参（否则会触发 log_event TypeError）
-            log_event(logger, "STRATEGY_SKIP", reason="draw_or_unknown_winner_token", **ctx)
+            skip_reason = (
+                "draw_market_unmapped"
+                if ev.winner == "draw"
+                else "unknown_winner_token"
+            )
+            log_event(logger, "STRATEGY_SKIP", reason=skip_reason, **ctx)
             self._record_skip(
-                market_id, "draw_or_unknown_winner_token", "", sport=ctx["sport"],
+                market_id, skip_reason, "", sport=ctx["sport"],
                 team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
             )
             return

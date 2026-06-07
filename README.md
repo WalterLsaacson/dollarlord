@@ -120,3 +120,9 @@ deploy/               # systemd / healthcheck
 ## 许可证
 
 MIT
+
+清空历史并重启
+./scripts/stop_bot.sh && ./scripts/clear_history.sh && ./scripts/start_bot.sh
+手动重启
+cd /Users/mando/Documents/polymarket-settlement-arb
+./scripts/start_bot.sh

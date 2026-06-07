@@ -36,7 +36,6 @@ NON_MATCH_KEYWORDS = (
     "team v",
     "placeholder v",
     "fighter v",
-    "end in a draw",
     "draw?",
     "o/u",
     "over/under",

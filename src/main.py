@@ -138,7 +138,6 @@ class ArbApp:
         if self.cfg.dashboard_enabled:
             from src.dashboard.bus import DashboardBus, set_bus
             from src.dashboard.hub import DashboardHub
-            from src.dashboard.log_handler import DashboardLogHandler
             from src.dashboard.server import run_dashboard_server
 
             bus = DashboardBus()
@@ -146,12 +145,8 @@ class ArbApp:
             bus.start()
             hub = DashboardHub(self)
             self._dashboard_hub = hub
+            hub.start_log_tail()
             bus.subscribe(hub.handle_event)
-
-            root_logger = logging.getLogger("arb")
-            dash_handler = DashboardLogHandler()
-            dash_handler.setLevel(logging.INFO)
-            root_logger.addHandler(dash_handler)
 
             tasks.append(
                 asyncio.create_task(

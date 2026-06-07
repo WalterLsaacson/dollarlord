@@ -67,6 +67,7 @@ body {
   box-shadow: var(--shadow);
 }
 .panel-wide { grid-column: 1 / -1; }
+.panel-list-full { grid-column: 1 / -1; }
 .panel-settlement {
   grid-column: 1 / -1;
   border-color: #93c5fd;

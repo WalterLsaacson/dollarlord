@@ -28,6 +28,21 @@ def format_ts_beijing(ts: float | int | None) -> str:
     return dt.strftime("%Y/%m/%d %H:%M:%S")
 
 
+# 成交/错过面板不展示的高频噪音（仍写入 DB 供排查）
+_HISTORY_NOISE = frozenset({
+    ("risk_block", "cooldown"),
+    ("risk_block", "live_paused"),
+    ("risk_block", "skipped"),
+    ("order_not_filled", "skipped"),
+    ("skip", "orderbook_fetch_failed"),
+})
+
+
+def history_event_visible(event_type: str, reason: str) -> bool:
+    """是否在 Dashboard 成交/错过列表展示。"""
+    return (event_type, reason) not in _HISTORY_NOISE
+
+
 @dataclass
 class MarketRow:
     """PM 市场行。"""
@@ -238,35 +253,59 @@ class Store:
         cur.execute("SELECT * FROM markets WHERE watch_state='watching' AND closed=0")
         return cur.fetchall()
 
-    def list_future_watchlist(self, grace_hours: float = 4.0) -> list[sqlite3.Row]:
-        """Dashboard 用：仅返回未开赛或可能仍在进行中的比赛，过滤历史场次。"""
+    def list_future_watchlist(self, grace_hours: float = 2.0) -> list[sqlite3.Row]:
+        """Dashboard 用：所有 watching + 开赛后 grace_hours 内的 done。"""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=grace_hours)
         cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
         cur = self._conn.cursor()
         cur.execute(
             """
             SELECT * FROM markets
-            WHERE watch_state='watching' AND closed=0
-              AND (game_start_time IS NULL OR game_start_time >= ?)
+            WHERE closed=0 AND (
+                watch_state='watching'
+                OR (
+                    watch_state='done'
+                    AND (game_start_time IS NULL OR game_start_time >= ?)
+                )
+            )
             ORDER BY game_start_time ASC
             """,
             (cutoff_iso,),
         )
         return cur.fetchall()
 
-    def get_market(self, market_id: str) -> sqlite3.Row | None:
+    def get_market_by_condition_id(self, condition_id: str) -> sqlite3.Row | None:
+        """按 condition_id 查 PM 市场（持仓展示盘口标题）。"""
+        if not condition_id:
+            return None
         cur = self._conn.cursor()
-        cur.execute("SELECT * FROM markets WHERE market_id=?", (market_id,))
+        cur.execute(
+            "SELECT * FROM markets WHERE lower(condition_id)=lower(?) LIMIT 1",
+            (condition_id,),
+        )
         return cur.fetchone()
 
     def get_market_by_token(self, token_id: str) -> sqlite3.Row | None:
-        """按 yes/no token_id 反查市场（用于盘口回调定位市场）。"""
+        """按 yes/no outcome token id 反查市场。"""
+        if not token_id:
+            return None
         cur = self._conn.cursor()
         cur.execute(
             "SELECT * FROM markets WHERE token_yes=? OR token_no=? LIMIT 1",
             (token_id, token_id),
         )
         return cur.fetchone()
+
+    def get_market(self, market_id: str) -> sqlite3.Row | None:
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM markets WHERE market_id=?", (market_id,))
+        return cur.fetchone()
+
+    def list_traded_market_ids(self) -> set[str]:
+        """已有成交记录的市场 id（Watchlist 排序用）。"""
+        cur = self._conn.cursor()
+        cur.execute("SELECT DISTINCT market_id FROM trades")
+        return {str(r["market_id"]) for r in cur.fetchall()}
 
     def set_watch_state(self, market_id: str, state: str, winner_side: str | None = None) -> None:
         cur = self._conn.cursor()
@@ -402,26 +441,27 @@ class Store:
         self._conn.commit()
         event_id = int(cur.lastrowid)
         row = self.get_market(market_id)
-        from src.dashboard.bus import emit_event
+        if history_event_visible(event_type, reason):
+            from src.dashboard.bus import emit_event
 
-        emit_event(
-            "history.new",
-            {
-                "kind": "missed",
-                "id": event_id,
-                "market_id": market_id,
-                "event_type": event_type,
-                "reason": reason,
-                "detail": detail,
-                "sport": sport or str(row["sport"] if row else ""),
-                "team_a": team_a or str(row["team_a"] if row else ""),
-                "team_b": team_b or str(row["team_b"] if row else ""),
-                "question": str(row["question"] if row else ""),
-                "price": price,
-                "created_at": ts,
-                "created_at_display": format_ts_beijing(ts),
-            },
-        )
+            emit_event(
+                "history.new",
+                {
+                    "kind": "missed",
+                    "id": event_id,
+                    "market_id": market_id,
+                    "event_type": event_type,
+                    "reason": reason,
+                    "detail": detail,
+                    "sport": sport or str(row["sport"] if row else ""),
+                    "team_a": team_a or str(row["team_a"] if row else ""),
+                    "team_b": team_b or str(row["team_b"] if row else ""),
+                    "question": str(row["question"] if row else ""),
+                    "price": price,
+                    "created_at": ts,
+                    "created_at_display": format_ts_beijing(ts),
+                },
+            )
         return event_id
 
     def is_condition_redeemed(self, condition_id: str) -> bool:
@@ -536,37 +576,68 @@ class Store:
         cur.execute("SELECT COUNT(*) AS c FROM signal_events")
         return int(cur.fetchone()["c"])
 
-    def list_merged_history(self, page: int = 1, page_size: int = 5) -> tuple[list[dict], int]:
-        """合并成交与错过记录，按时间倒序分页。"""
+    def list_merged_history_all(self) -> list[dict]:
+        """返回全部成交/错过/结算记录（无分页）。"""
+        items, _ = self.list_merged_history(page=1, page_size=0)
+        return items
+
+    def list_merged_history(self, page: int = 1, page_size: int = 10) -> tuple[list[dict], int]:
+        """合并成交与错过记录，SQL 分页；page_size=0 表示返回全部。"""
         cur = self._conn.cursor()
+        skip_noise = """
+            NOT (
+                (s.event_type='risk_block' AND s.reason IN ('cooldown', 'live_paused', 'skipped'))
+                OR (s.event_type='order_not_filled' AND s.reason='skipped')
+                OR (s.event_type='skip' AND s.reason='orderbook_fetch_failed')
+            )
+        """
         cur.execute(
-            """
-            SELECT 'success' AS kind, t.id, t.market_id, t.mode, t.notional_usd, t.price,
-                   t.status AS reason, t.detail, t.created_at,
-                   m.question, m.team_a, m.team_b, m.sport, 'trade' AS event_type
-            FROM trades t
-            LEFT JOIN markets m ON m.market_id = t.market_id
-            UNION ALL
-            SELECT 'missed' AS kind, s.id, s.market_id, NULL, NULL, s.price,
-                   s.reason, s.detail, s.created_at,
-                   m.question, s.team_a, s.team_b, s.sport, s.event_type
-            FROM signal_events s
-            LEFT JOIN markets m ON m.market_id = s.market_id
-            UNION ALL
-            SELECT 'redeem' AS kind, r.id, NULL, NULL, r.usdc_gained, r.cur_price,
-                   r.status AS reason, r.detail, r.created_at,
-                   r.title AS question, r.title AS team_a, r.trigger AS team_b,
-                   '' AS sport, 'redeem' AS event_type
-            FROM redemptions r
-            ORDER BY created_at DESC
+            f"""
+            SELECT COUNT(*) AS c FROM (
+                SELECT t.created_at FROM trades t
+                UNION ALL
+                SELECT s.created_at FROM signal_events s
+                WHERE {skip_noise}
+                UNION ALL
+                SELECT r.created_at FROM redemptions r
+            )
             """
         )
-        rows = cur.fetchall()
-        total = len(rows)
-        offset = (page - 1) * page_size
-        page_rows = rows[offset : offset + page_size]
+        total = int(cur.fetchone()["c"])
+        offset = max(0, (page - 1) * page_size) if page_size > 0 else 0
+        limit_sql = "LIMIT ? OFFSET ?" if page_size > 0 else ""
+        params: tuple = (page_size, offset) if page_size > 0 else ()
+        cur.execute(
+            f"""
+            SELECT kind, id, market_id, mode, notional_usd, price, reason, detail,
+                   created_at, question, team_a, team_b, sport, event_type
+            FROM (
+                SELECT 'success' AS kind, t.id, t.market_id, t.mode, t.notional_usd, t.price,
+                       t.status AS reason, t.detail, t.created_at,
+                       m.question, m.team_a, m.team_b, m.sport, 'trade' AS event_type
+                FROM trades t
+                LEFT JOIN markets m ON m.market_id = t.market_id
+                UNION ALL
+                SELECT 'missed' AS kind, s.id, s.market_id, NULL, NULL, s.price,
+                       s.reason, s.detail, s.created_at,
+                       COALESCE(m.question, s.team_a), s.team_a, s.team_b, s.sport, s.event_type
+                FROM signal_events s
+                LEFT JOIN markets m ON m.market_id = s.market_id
+                WHERE {skip_noise}
+                UNION ALL
+                SELECT 'redeem' AS kind, r.id, NULL, NULL, r.usdc_gained, r.cur_price,
+                       r.status AS reason, r.detail, r.created_at,
+                       r.title AS question, r.title AS team_a, r.trigger AS team_b,
+                       '' AS sport, 'redeem' AS event_type
+                FROM redemptions r
+            )
+            ORDER BY created_at DESC
+            {limit_sql}
+            """,
+            params,
+        )
         items: list[dict] = []
-        for r in page_rows:
+        for r in cur.fetchall():
             item = dict(r)
             item["created_at_display"] = format_ts_beijing(item.get("created_at"))
             items.append(item)

@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,8 +14,8 @@ from fastapi import WebSocket
 
 from src.sports.base import FixtureStatus, FixtureUpdate, SportType
 
-# Dashboard Watchlist 每页条数
-WATCHLIST_PAGE_SIZE = 10
+# Dashboard 日志 tail 初始行数
+LOG_TAIL_INITIAL = 300
 
 # 健康检查展示名
 SOURCE_LABELS: dict[str, str] = {
@@ -42,6 +43,14 @@ def _parse_game_start(iso: str | None) -> float:
         return dt.timestamp()
     except Exception:
         return float("inf")
+
+
+def _watchlist_sort_key(item: dict[str, Any]) -> tuple:
+    """ARMED / 已成交 / 直播中优先，其余按开赛时间。"""
+    armed = 0 if item.get("armed") else 1
+    traded = 0 if item.get("has_trade") else 1
+    live = 0 if (item.get("fixture") or {}).get("status") == "live" else 1
+    return (armed, traded, live, _parse_game_start(item.get("game_start_time")))
 
 
 def _fixture_to_dict(f: FixtureUpdate) -> dict[str, Any]:
@@ -76,6 +85,11 @@ class DashboardHub:
         self._watchlist_cache: list[dict[str, Any]] | None = None
         self._watchlist_cache_at: float = 0.0
         self._watchlist_cache_ttl = 3.0
+        # arb.jsonl 增量 tail（字节偏移）
+        self._log_path: Path | None = None
+        self._log_offset: int = 0
+        self._log_tail_task: asyncio.Task[None] | None = None
+        self._log_tail_buffer: str = ""
 
     def invalidate_watchlist_cache(self) -> None:
         """watchlist 变更时清缓存。"""
@@ -114,17 +128,19 @@ class DashboardHub:
             self._schedule_book_push(payload)
         elif event_type == "watchlist.changed":
             self.invalidate_watchlist_cache()
-            page = payload.get("page", 1)
-            data = self.build_watchlist_page(page, WATCHLIST_PAGE_SIZE)
-            await self.broadcast({"type": "watchlist.page", "data": data})
+            data = self.build_watchlist()
+            await self.broadcast({"type": "watchlist.full", "data": data})
         elif event_type == "history.new":
+            if payload.get("kind") == "success":
+                self.invalidate_watchlist_cache()
             await self.broadcast({"type": "history.new", "item": payload})
         elif event_type == "positions.changed":
             await self.broadcast({"type": "positions.changed", "data": {}})
         elif event_type == "status.updated":
             await self.broadcast({"type": "status.updated", "data": self.build_status()})
         elif event_type == "log.append":
-            await self.broadcast({"type": "log.append", "line": payload})
+            # 日志以 arb.jsonl tail 为准，忽略 bus 推送避免重复
+            pass
 
     def _schedule_book_push(self, payload: dict[str, Any]) -> None:
         token_id = payload.get("token_id", "")
@@ -145,32 +161,19 @@ class DashboardHub:
             await self.broadcast({"type": "focus.updated", "data": focus})
 
     def _market_fixture(self, row: Any) -> FixtureUpdate | None:
-        app = self._app
-        sport = SportType.NBA if row["sport"] == "nba" else SportType.FOOTBALL
-        ta = str(row["team_a"] or "")
-        tb = str(row["team_b"] or "")
-        from src.matcher.reverse_matcher import normalize_team, teams_match
+        """匹配赛果快照（须开球对齐，避免未来盘显示历史比分）。"""
+        return self._app.matcher.pick_fixture_for_market(
+            row, self._app.aggregator.live_fixtures()
+        )
 
-        for f in app.aggregator.live_fixtures():
-            if f.sport != sport:
-                continue
-            sp = row["sport"]
-            if teams_match(
-                normalize_team(ta, app.store, sp),
-                normalize_team(tb, app.store, sp),
-                normalize_team(f.home_team, app.store, sp),
-                normalize_team(f.away_team, app.store, sp),
-            ):
-                return f
-        return None
-
-    def _enrich_market_row(self, row: Any) -> dict[str, Any]:
+    def _enrich_market_row(self, row: Any, traded_ids: set[str] | None = None) -> dict[str, Any]:
         app = self._app
         market_id = row["market_id"]
         armed = market_id in app.signals._armed
         fixture = self._market_fixture(row)
         book_yes = app.books.get_book(row["token_yes"]) if row["token_yes"] else None
         book_no = app.books.get_book(row["token_no"]) if row["token_no"] else None
+        has_trade = market_id in traded_ids if traded_ids is not None else False
         item: dict[str, Any] = {
             "market_id": market_id,
             "question": row["question"],
@@ -179,6 +182,7 @@ class DashboardHub:
             "team_b": row["team_b"],
             "game_start_time": row["game_start_time"],
             "armed": armed,
+            "has_trade": has_trade,
             "yes_ask": book_yes.best_ask if book_yes else None,
             "no_ask": book_no.best_ask if book_no else None,
             "fixture": _fixture_to_dict(fixture) if fixture else None,
@@ -193,26 +197,28 @@ class DashboardHub:
             and now - self._watchlist_cache_at < self._watchlist_cache_ttl
         ):
             return self._watchlist_cache
-        rows = self._app.store.list_future_watchlist()
-        enriched = [self._enrich_market_row(r) for r in rows]
-        enriched.sort(key=lambda x: _parse_game_start(x.get("game_start_time")))
+        rows = self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours)
+        traded_ids = self._app.store.list_traded_market_ids()
+        enriched = [self._enrich_market_row(r, traded_ids) for r in rows]
+        enriched.sort(key=_watchlist_sort_key)
         self._watchlist_cache = enriched
         self._watchlist_cache_at = now
         return enriched
 
-    def build_watchlist_page(
-        self, page: int = 1, page_size: int = WATCHLIST_PAGE_SIZE
-    ) -> dict[str, Any]:
+    def build_watchlist(self) -> dict[str, Any]:
+        """返回完整 Watchlist（无分页）。"""
         enriched = self._get_enriched_watchlist()
         total = len(enriched)
-        offset = max(0, (page - 1) * page_size)
-        items = enriched[offset : offset + page_size]
         self._watchlist_total = total
-        return {"items": items, "total": total, "page": page, "page_size": page_size}
+        return {"items": enriched, "total": total}
+
+    # 兼容旧调用名
+    def build_watchlist_page(self, page: int = 1, page_size: int = 0) -> dict[str, Any]:
+        return self.build_watchlist()
 
     def build_focus(self) -> dict[str, Any] | None:
         """焦点比赛：当前最可能触发买入的监听场次（ARMED 优先，其次直播中，否则最近开赛）。"""
-        rows = self._app.store.list_future_watchlist()
+        rows = self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours)
         if not rows:
             return None
         candidates: list[tuple[int, Any]] = []
@@ -321,30 +327,35 @@ class DashboardHub:
             "geoblocked": app.risk.geoblocked,
             "live_paused": app.risk.live_paused,
             "armed_count": len(app.signals._armed),
-            "watchlist_total": self._watchlist_total or len(self._app.store.list_future_watchlist()),
+            "watchlist_total": self._watchlist_total
+            or len(self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours)),
             "auto_redeem_enabled": app.cfg.auto_redeem_enabled,
             "redeem_enabled": app.redeem.enabled(),
         }
 
-    def build_snapshot(self, watchlist_page: int = 1, history_page: int = 1) -> dict[str, Any]:
-        history_items, history_total = self._app.store.list_merged_history(history_page, 5)
+    def build_history(self) -> dict[str, Any]:
+        """返回完整成交/错过列表（无分页）。"""
+        items = self._app.store.list_merged_history_all()
+        return {"items": items, "total": len(items)}
+
+    def build_snapshot(self) -> dict[str, Any]:
         return {
             "type": "snapshot.full",
             "health": self.build_health_panel(),
-            "watchlist": self.build_watchlist_page(watchlist_page, WATCHLIST_PAGE_SIZE),
+            "watchlist": self.build_watchlist(),
             "focus": self.build_focus(),
-            "history": {
-                "items": history_items,
-                "total": history_total,
-                "page": history_page,
-                "page_size": 5,
-            },
+            "history": self.build_history(),
             "status": self.build_status(),
-            "logs": self._tail_logs(100),
+            "logs": self._tail_logs(LOG_TAIL_INITIAL),
+            "log_source": str(self._app.cfg.log_path),
         }
 
+    def _log_file_path(self) -> Path:
+        return self._app.cfg.resolve_path(self._app.cfg.log_path)
+
     def _tail_logs(self, n: int) -> list[dict[str, Any]]:
-        log_path = self._app.cfg.resolve_path(self._app.cfg.log_path)
+        """读取 logs/arb.jsonl 末尾 n 行。"""
+        log_path = self._log_file_path()
         if not log_path.is_file():
             return []
         try:
@@ -359,12 +370,58 @@ class DashboardHub:
         except Exception:
             return []
 
+    def start_log_tail(self) -> None:
+        """启动 arb.jsonl 实时 tail 任务。"""
+        if self._log_tail_task is not None and not self._log_tail_task.done():
+            return
+        log_path = self._log_file_path()
+        self._log_path = log_path
+        if log_path.is_file():
+            self._log_offset = log_path.stat().st_size
+        else:
+            self._log_offset = 0
+        self._log_tail_buffer = ""
+        self._log_tail_task = asyncio.create_task(self._log_tail_loop())
+
+    async def _log_tail_loop(self) -> None:
+        """轮询 arb.jsonl 增量并推送到 WebSocket。"""
+        while True:
+            await asyncio.sleep(0.3)
+            log_path = self._log_file_path()
+            if not log_path.is_file():
+                continue
+            try:
+                size = log_path.stat().st_size
+                if size < self._log_offset:
+                    self._log_offset = 0
+                    self._log_tail_buffer = ""
+                if size <= self._log_offset:
+                    continue
+                with log_path.open("rb") as fh:
+                    fh.seek(self._log_offset)
+                    chunk = fh.read(size - self._log_offset)
+                self._log_offset = size
+                text = self._log_tail_buffer + chunk.decode("utf-8", errors="replace")
+                parts = text.split("\n")
+                self._log_tail_buffer = parts.pop() if parts else text
+                for line in parts:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    await self.broadcast({"type": "log.append", "line": payload})
+            except Exception:
+                continue
+
     def _build_fixture_patches(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         match_key = payload.get("match_key")
         if not match_key:
             return []
         patches: list[dict[str, Any]] = []
-        for row in self._app.store.list_future_watchlist():
+        for row in self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours):
             item = self._enrich_market_row(row)
             fx = item.get("fixture")
             if fx and fx.get("match_key") == match_key:
@@ -373,7 +430,7 @@ class DashboardHub:
 
     def _build_book_patches(self, pending: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         patches: list[dict[str, Any]] = []
-        for row in self._app.store.list_future_watchlist():
+        for row in self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours):
             mid = row["market_id"]
             yes_t = row["token_yes"]
             no_t = row["token_no"]

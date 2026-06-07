@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,8 @@ USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 ZERO_ADDRESS = "0x" + "00" * 20
 DATA_API = "https://data-api.polymarket.com/positions"
+# 条件 token 与 USDC 同为 6 位小数
+_CTF_DECIMALS = 1_000_000.0
 
 CTF_BALANCE_ABI = [
     {
@@ -55,8 +58,12 @@ class PositionView:
     slug: str = ""
 
     def is_winner_at(self, threshold: float) -> bool:
-        """胜方 token 价格是否达到自动结算阈值（如 0.998 ≈ 99.8%）。"""
-        return self.cur_price >= threshold
+        """胜方 token 价格是否达到结算阈值（1.0 = 100%）。"""
+        return self.cur_price + 1e-9 >= threshold
+
+    def question_label(self) -> str:
+        """展示用盘口标题（优先 PM question）。"""
+        return self.title
 
 
 @dataclass
@@ -108,18 +115,37 @@ class RedeemService:
             self._w3 = Web3(Web3.HTTPProvider(self.cfg.polygon_rpc_url))
         return self._w3
 
+    def _can_settle(self, pos: PositionView) -> bool:
+        """是否满足结算条件：redeemable 且价格 = 100%。"""
+        return pos.redeemable and self._is_winner(pos)
+
+    def _resolve_question(self, pos: PositionView) -> str:
+        """Polymarket 盘口标题：本地库 question > Data API title。"""
+        row = self.store.get_market_by_condition_id(pos.condition_id)
+        if not row:
+            row = self.store.get_market_by_token(pos.asset)
+        if row and row["question"]:
+            return str(row["question"])
+        return pos.title or pos.slug or pos.condition_id[:16]
+
     async def fetch_positions(self) -> list[PositionView]:
-        """从 Polymarket Data API 拉取当前代理钱包持仓。"""
+        """从 Polymarket Data API 拉取当前代理钱包持仓（实时）。"""
         wallet = self._proxy_wallet()
         if not wallet:
             return []
         client = await self.proxy.get_httpx_client()
-        resp = await client.get(DATA_API, params={"user": wallet.lower()})
+        resp = await client.get(
+            DATA_API,
+            params={"user": wallet.lower(), "sizeThreshold": 0.01},
+        )
         resp.raise_for_status()
         raw = resp.json()
         out: list[PositionView] = []
         for p in raw:
             try:
+                size = float(p.get("size") or 0)
+                if size < 0.01:
+                    continue
                 out.append(
                     PositionView(
                         condition_id=str(p.get("conditionId") or ""),
@@ -127,7 +153,7 @@ class RedeemService:
                         asset=str(p.get("asset") or ""),
                         opposite_asset=str(p.get("oppositeAsset") or ""),
                         outcome_index=int(p.get("outcomeIndex") or 0),
-                        size=float(p.get("size") or 0),
+                        size=size,
                         cur_price=float(p.get("curPrice") or 0),
                         redeemable=bool(p.get("redeemable")),
                         negative_risk=bool(p.get("negativeRisk")),
@@ -297,7 +323,23 @@ class RedeemService:
             return RedeemOutcome(False, condition_id, title, detail="live 模式未配置 FUNDER/PK")
 
         if self.store.is_condition_redeemed(condition_id):
-            return RedeemOutcome(False, condition_id, title, detail="该场次已结算过")
+            # 已成功结算过：再查链上是否仍有份额（避免误挡）
+            if pos:
+                w3 = self._web3()
+                if w3.is_connected():
+                    bal = self._ctf_balance(w3, self._proxy_wallet(), pos.asset)
+                    if bal <= 0:
+                        return RedeemOutcome(False, condition_id, title, detail="该盘口已结算")
+            else:
+                return RedeemOutcome(False, condition_id, title, detail="该盘口已结算")
+
+        if pos and not self._can_settle(pos):
+            return RedeemOutcome(
+                False,
+                condition_id,
+                title,
+                detail=f"价格未达 100%（curPrice={pos.cur_price}）",
+            )
 
         if pos and winner_only and not self._is_winner(pos):
             return RedeemOutcome(False, condition_id, title, detail="非胜方持仓，跳过自动结算")
@@ -382,36 +424,54 @@ class RedeemService:
         *,
         winner_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """返回可展示/可结算的持仓列表。"""
+        """返回链上仍有份额的真实持仓（非历史结算记录）。"""
         positions = await self.fetch_positions()
+        proxy = self._proxy_wallet()
+        w3 = self._web3()
+        chain_ok = w3.is_connected()
+
         by_cond: dict[str, PositionView] = {}
         for p in positions:
-            if not p.condition_id or p.size <= 0:
-                continue
-            if p.condition_id not in by_cond:
+            if p.condition_id and p.condition_id not in by_cond:
                 by_cond[p.condition_id] = p
 
         items: list[dict[str, Any]] = []
         for p in by_cond.values():
-            if winner_only and not self._is_winner(p):
+            # 必须链上确认份额，避免 Data API 返回已清空的历史持仓
+            if not chain_ok:
                 continue
-            if not p.redeemable and not self._is_winner(p):
+            chain_raw = await asyncio.to_thread(
+                self._ctf_balance, w3, proxy, p.asset
+            )
+            if chain_raw <= 0:
                 continue
+            chain_size = chain_raw / _CTF_DECIMALS
+            if chain_size < 0.01:
+                continue
+
+            can_settle = self._can_settle(p)
+            if winner_only and not can_settle:
+                continue
+
+            question = self._resolve_question(p)
             items.append(
                 {
                     "condition_id": p.condition_id,
-                    "title": p.title,
-                    "size": p.size,
+                    "question": question,
+                    "title": question,
+                    "outcome": p.title,
+                    "size": round(chain_size, 4),
                     "cur_price": p.cur_price,
                     "cur_price_pct": round(p.cur_price * 100, 1),
                     "redeemable": p.redeemable,
+                    "can_settle": can_settle,
                     "is_winner": self._is_winner(p),
                     "negative_risk": p.negative_risk,
                     "already_redeemed": self.store.is_condition_redeemed(p.condition_id),
                     "slug": p.slug,
                 }
             )
-        items.sort(key=lambda x: (-float(x["cur_price"]), x["title"]))
+        items.sort(key=lambda x: (-float(x["cur_price"]), x["question"]))
         return items
 
     async def auto_redeem_winners(self) -> list[RedeemOutcome]:
@@ -425,20 +485,18 @@ class RedeemService:
             if p.condition_id:
                 by_cond[p.condition_id] = p
 
-        threshold = self.cfg.redeem_price_threshold
         results: list[RedeemOutcome] = []
-        seen: set[str] = set()
-
         for p in by_cond.values():
-            if p.condition_id in seen:
-                continue
-            seen.add(p.condition_id)
             if not p.redeemable:
                 continue
-            if p.cur_price < threshold:
+            if not self._can_settle(p):
                 continue
             if self.store.is_condition_redeemed(p.condition_id):
-                continue
+                w3 = self._web3()
+                if w3.is_connected():
+                    bal = self._ctf_balance(w3, self._proxy_wallet(), p.asset)
+                    if bal <= 0:
+                        continue
 
             log_event(
                 logger,
@@ -458,19 +516,17 @@ class RedeemService:
             )
         return results
 
-    async def redeem_all_manual(self, *, winners_only: bool = False) -> list[RedeemOutcome]:
-        """手动结算： redeemable 持仓（可选仅胜方）。"""
+    async def redeem_all_manual(self, *, winners_only: bool = True) -> list[RedeemOutcome]:
+        """手动结算：仅 price=100% 且 redeemable 的持仓。"""
         positions = await self.fetch_positions()
         by_cond: dict[str, PositionView] = {}
         for p in positions:
-            if p.condition_id and p.redeemable:
+            if p.condition_id:
                 by_cond[p.condition_id] = p
 
         results: list[RedeemOutcome] = []
         for p in by_cond.values():
-            if winners_only and not self._is_winner(p):
-                continue
-            if self.store.is_condition_redeemed(p.condition_id):
+            if not self._can_settle(p):
                 continue
             results.append(
                 self.redeem_condition(

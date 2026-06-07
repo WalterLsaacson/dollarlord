@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.dashboard.hub import WATCHLIST_PAGE_SIZE, DashboardHub
+from src.dashboard.hub import DashboardHub
 
 logger = logging.getLogger("arb.dashboard")
 
@@ -37,18 +37,12 @@ def create_app(hub: DashboardHub) -> FastAPI:
         return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/api/watchlist")
-    async def api_watchlist(
-        page: int = 1, page_size: int = WATCHLIST_PAGE_SIZE
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(hub.build_watchlist_page, page, page_size)
+    async def api_watchlist() -> dict[str, Any]:
+        return await asyncio.to_thread(hub.build_watchlist)
 
     @app.get("/api/history")
-    async def api_history(page: int = 1, page_size: int = 5) -> dict[str, Any]:
-        def _fetch() -> dict[str, Any]:
-            items, total = hub._app.store.list_merged_history(page, page_size)
-            return {"items": items, "total": total, "page": page, "page_size": page_size}
-
-        return await asyncio.to_thread(_fetch)
+    async def api_history() -> dict[str, Any]:
+        return await asyncio.to_thread(hub.build_history)
 
     def _script_paths() -> tuple[Path, Path, Path, str]:
         root = hub._app.cfg.project_root
@@ -87,11 +81,13 @@ def create_app(hub: DashboardHub) -> FastAPI:
 
         async def _fetch() -> dict[str, Any]:
             items = await app_ref.redeem.list_settlement_candidates(winner_only=False)
+            w3 = app_ref.redeem._web3()
             return {
                 "items": items,
                 "enabled": app_ref.redeem.enabled(),
                 "auto_redeem": app_ref.cfg.auto_redeem_enabled,
                 "threshold_pct": round(app_ref.cfg.redeem_price_threshold * 100, 1),
+                "chain_ok": w3.is_connected(),
             }
 
         return await _fetch()
@@ -201,35 +197,12 @@ def create_app(hub: DashboardHub) -> FastAPI:
     async def ws_endpoint(ws: WebSocket) -> None:
         await ws.accept()
         await hub.register_client(ws)
+        hub.start_log_tail()
         try:
             await ws.send_json(await asyncio.to_thread(hub.build_snapshot))
             while True:
-                # 客户端翻页走 WebSocket，避免阻塞主事件循环
-                raw = await ws.receive_text()
-                if raw.startswith("{"):
-                    import json
-
-                    msg = json.loads(raw)
-                    if msg.get("type") == "watchlist.page":
-                        page = int(msg.get("page", 1))
-                        ps = int(msg.get("page_size", WATCHLIST_PAGE_SIZE))
-                        data = await asyncio.to_thread(hub.build_watchlist_page, page, ps)
-                        await ws.send_json({"type": "watchlist.page", "data": data})
-                    elif msg.get("type") == "history.page":
-                        page = int(msg.get("page", 1))
-
-                        def _hist() -> dict[str, Any]:
-                            items, total = hub._app.store.list_merged_history(page, 5)
-                            return {
-                                "items": items,
-                                "total": total,
-                                "page": page,
-                                "page_size": 5,
-                            }
-
-                        await ws.send_json(
-                            {"type": "history.page", "data": await asyncio.to_thread(_hist)}
-                        )
+                # 保持连接；翻页已移除
+                await ws.receive_text()
         except WebSocketDisconnect:
             pass
         finally:
