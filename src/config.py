@@ -56,6 +56,8 @@ class AppConfig(BaseModel):
     # ---- 各数据源每分钟最大请求数（分开计数限流） ----
     rate_football_data_per_min: int = 10
     rate_api_football_per_min: int = 10
+    # API-Football 免费层每日配额（100次/天，预留5次余量）
+    api_football_daily_quota: int = 95
     rate_thesportsdb_per_min: int = 30
     rate_balldontlie_per_min: int = 5
     # ESPN 三个运动端点共享此限速（soccer + NBA + NFL 合计不超过该值/分钟）
@@ -189,6 +191,8 @@ def load_config(path: str | Path) -> AppConfig:
         "football_data_api_key": "FOOTBALL_DATA_API_KEY",
         "api_football_key": "API_FOOTBALL_KEY",
         "balldontlie_key": "BALLDONTLIE_KEY",
+        "pandascore_key": "PANDASCORE_KEY",
+        "lolesports_api_key": "LOLESPORTS_API_KEY",
     }
     for field, env_name in env_map.items():
         if not getattr(cfg, field):

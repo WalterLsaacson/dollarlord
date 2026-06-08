@@ -50,10 +50,10 @@ rate_lolesports_per_min: 20
 
 # API key 也可写在项目根 polymarket-arb.env（优先于 YAML）
 thesportsdb_key: "123"
-# pandascore_key: ""        # 注册 pandascore.co 后填入，或设置 PANDASCORE_KEY 环境变量
-# lolesports_api_key: ""    # 默认使用前端内嵌 key，可按需更新
+# pandascore_key: ""        # 填入此处，或在 polymarket-arb.env 写 PANDASCORE_KEY=xxx
+# lolesports_api_key: ""    # 默认使用前端内嵌 key，可按需更新（或设置 LOLESPORTS_API_KEY）
 
-sports: [football, nba, mlb, nhl]
+sports: [football, nba, mlb, nhl, cs2, lol]
 # 电竞：需在 pandascore.co 注册免费 API Key 后启用
 # sports: [football, nba, mlb, nhl, cs2, lol]
 

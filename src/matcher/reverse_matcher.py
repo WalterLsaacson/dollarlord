@@ -27,7 +27,7 @@ _STRIP_SUFFIX = re.compile(
     re.I,
 )
 # “Will X win/beat/defeat …?” 盘口：Yes = 题干队 X 赢（兼容电竞 beat/defeat 格式）
-_WILL_WIN = re.compile(r”^will\s+(.+?)\s+(?:win|beat|defeat)\b”, re.I)
+_WILL_WIN = re.compile(r"^will\s+(.+?)\s+(?:win|beat|defeat)\b", re.I)
 # 「… end in a draw?」专用平局盘
 _DRAW_MARKET = re.compile(r"end in a draw\??\s*$", re.I)
 
@@ -63,7 +63,7 @@ def _sport_key_and_type(sport: str) -> tuple[str, SportType]:
     return _SPORT_MAP.get(sport, ("football", SportType.FOOTBALL))
 
 
-
+def _team_eq(x: str, y: str) -> bool:
     """单队名是否等价：完全相等或较长队名间的子串包含。"""
     if not x or not y:
         return False
