@@ -83,6 +83,7 @@ class PandascoreProvider:
                         updates.append(u)
 
             # 最近完赛（过去 48 小时）
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             )
@@ -92,7 +93,7 @@ class PandascoreProvider:
                 params={
                     "sort": "-begin_at",
                     "page[size]": "30",
-                    "range[begin_at]": f"{cutoff},",
+                    "range[begin_at]": f"{cutoff},{now_str}",
                 },
             )
             resp.raise_for_status()

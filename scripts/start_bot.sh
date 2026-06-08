@@ -58,7 +58,7 @@ if ! kill -0 "$BPID" 2>/dev/null; then
 fi
 
 if ! lsof -nP -iTCP:"$DASH_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "[警告] bot 进程在运行但 Dashboard 未监听 $DASH_PORT，请查看 $LOG_FILE"
+  echo "[警告] bot 进程在运行但 Dashboard 未监听 ${DASH_PORT}，请查看 $LOG_FILE"
 else
   echo "Dashboard 已监听 http://127.0.0.1:$DASH_PORT"
 fi
