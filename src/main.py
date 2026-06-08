@@ -27,8 +27,11 @@ from src.sports.aggregator import FixtureAggregator
 from src.sports.api_football import ApiFootballProvider
 from src.sports.balldontlie import BallDontLieProvider
 from src.sports.espn_nba import EspnNbaProvider
+from src.sports.espn_nfl import EspnNflProvider
 from src.sports.espn_soccer import EspnSoccerProvider
 from src.sports.football_data import FootballDataProvider
+from src.sports.mlb_statsapi import MlbStatsApiProvider
+from src.sports.nhl_api import NhlApiProvider
 from src.sports.openligadb import OpenLigaDbProvider
 from src.sports.thesportsdb import TheSportsDbProvider
 from src.store.sqlite import Store
@@ -55,6 +58,8 @@ class ArbApp:
         self.redeem = RedeemService(cfg, self.store, self.proxy)
 
         # ---- 各数据源独立限流器（分开计数，互不影响）----
+        # ESPN 三个运动端点共用同一令牌桶，避免从同一 IP 合计超出 ESPN 服务器限速
+        _espn_shared = AsyncRateLimiter(cfg.rate_espn_per_min, 60.0, "espn_shared")
         self.limiters: dict[str, Any] = {
             "football_data": AsyncRateLimiter(cfg.rate_football_data_per_min, 60.0, "football_data"),
             # API-Football：10/分钟 + 每日配额双窗口
@@ -64,9 +69,12 @@ class ArbApp:
             ),
             "thesportsdb": AsyncRateLimiter(cfg.rate_thesportsdb_per_min, 60.0, "thesportsdb"),
             "balldontlie": AsyncRateLimiter(cfg.rate_balldontlie_per_min, 60.0, "balldontlie"),
-            "espn_soccer": AsyncRateLimiter(cfg.rate_espn_per_min, 60.0, "espn_soccer"),
-            "espn_nba": AsyncRateLimiter(cfg.rate_espn_per_min, 60.0, "espn_nba"),
+            "espn_soccer": _espn_shared,
+            "espn_nba": _espn_shared,
+            "espn_nfl": _espn_shared,
             "openligadb": AsyncRateLimiter(cfg.rate_openligadb_per_min, 60.0, "openligadb"),
+            "mlb_statsapi": AsyncRateLimiter(cfg.rate_mlb_per_min, 60.0, "mlb_statsapi"),
+            "nhl_api": AsyncRateLimiter(cfg.rate_nhl_per_min, 60.0, "nhl_api"),
         }
 
         # ---- 足球数据源（全部接入，各自限流）----
@@ -80,6 +88,11 @@ class ArbApp:
         self.espn_nba = EspnNbaProvider(self.proxy, self.store, self.limiters["espn_nba"])
         self.balldontlie = BallDontLieProvider(cfg, self.proxy, self.store, self.limiters["balldontlie"])
 
+        # ---- MLB / NHL / NFL 官方免费数据源 ----
+        self.mlb_statsapi = MlbStatsApiProvider(self.proxy, self.store, self.limiters["mlb_statsapi"])
+        self.nhl_api = NhlApiProvider(self.proxy, self.store, self.limiters["nhl_api"])
+        self.espn_nfl = EspnNflProvider(self.proxy, self.store, self.limiters["espn_nfl"])
+
         # 按运动归类的数据源列表（TheSportsDB 同时覆盖足球+篮球）
         self.football_sources = [
             self.espn_soccer,
@@ -92,6 +105,9 @@ class ArbApp:
             self.espn_nba,
             self.balldontlie,
         ]
+        self.mlb_sources = [self.mlb_statsapi]
+        self.nhl_sources = [self.nhl_api]
+        self.nfl_sources = [self.espn_nfl]
 
         self._stop = asyncio.Event()
         self._has_live_fixtures = False
@@ -102,14 +118,16 @@ class ArbApp:
     async def _fetch_all_fixtures(self) -> list:
         """汇总所有已启用数据源的最新赛事更新（各源内部已限流）。"""
         all_fixtures: list = []
-        if "football" in self.cfg.sports:
-            for src in self.football_sources:
-                try:
-                    all_fixtures.extend(await src.fetch_updates())
-                except Exception as e:
-                    logger.debug("数据源 %s 拉取异常: %s", getattr(src, "source_id", src), e)
-        if "nba" in self.cfg.sports:
-            for src in self.nba_sources:
+        for sport_key, sources in [
+            ("football", self.football_sources),
+            ("nba", self.nba_sources),
+            ("mlb", self.mlb_sources),
+            ("nhl", self.nhl_sources),
+            ("nfl", self.nfl_sources),
+        ]:
+            if sport_key not in self.cfg.sports:
+                continue
+            for src in sources:
                 try:
                     all_fixtures.extend(await src.fetch_updates())
                 except Exception as e:

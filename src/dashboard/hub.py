@@ -30,6 +30,9 @@ SOURCE_LABELS: dict[str, str] = {
     "thesportsdb": "TheSportsDB",
     "espn_nba": "ESPN NBA",
     "balldontlie": "BallDontLie",
+    "mlb_statsapi": "MLB StatsAPI",
+    "nhl_api": "NHL API",
+    "espn_nfl": "ESPN NFL",
 }
 
 def _parse_game_start(iso: str | None) -> float:
@@ -361,6 +364,9 @@ class DashboardHub:
             "thesportsdb",
             "espn_nba",
             "balldontlie",
+            "mlb_statsapi",
+            "nhl_api",
+            "espn_nfl",
         ]
         return [self._build_health_item(sid) for sid in known_ids]
 

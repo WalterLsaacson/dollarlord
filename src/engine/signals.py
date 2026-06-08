@@ -15,7 +15,7 @@ from src.engine.kickoff_align import (
 )
 from src.engine.ladder_executor import LadderExecutor
 from src.logging_setup import log_event
-from src.matcher.reverse_matcher import ReverseMatcher, normalize_team, teams_match
+from src.matcher.reverse_matcher import ReverseMatcher, _sport_key_and_type, normalize_team, teams_match
 from src.pm.clob_ws import ClobOrderbookFeed, OrderbookSnapshot
 from src.sports.aggregator import FinalEvent, FixtureAggregator
 from src.sports.base import FixtureUpdate, SportType
@@ -184,10 +184,10 @@ class SignalEngine:
     ) -> str | None:
         """按运动+队名在 watchlist 中反查市场 id；多场同名时按开球时间择优。"""
         rows = self.store.list_active_watchlist()
-        sport = "nba" if sport_value == "nba" else "football"
+        sport, _ = _sport_key_and_type(sport_value)
         candidates = []
         for row in rows:
-            if row["sport"] != sport:
+            if row["sport"] != sport_value:
                 continue
             ta = normalize_team(str(row["team_a"] or ""), self.store, sport)
             tb = normalize_team(str(row["team_b"] or ""), self.store, sport)

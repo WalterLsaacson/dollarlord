@@ -20,14 +20,12 @@ NBA_TAG_HINTS = ("nba", "basketball")
 FOOTBALL_TAG_HINTS = ("soccer", "football", "epl", "ucl", "mls", "la liga", "bundesliga")
 NBA_EXCLUDE_HINTS = ("wnba",)
 FOOTBALL_EXCLUDE_HINTS = ("nfl", "ncaa football", "cfp", "super bowl")
-# 过滤非“单场对阵”市场（冠军、奖项、选举等）
+# 过滤非"单场对阵"市场（冠军、奖项、选举等）
 NON_MATCH_KEYWORDS = (
     "governor",
     "president",
     "election",
-    "stanley cup",
     "world cup",
-    "nba finals",
     "champion",
     "winner",
     "mvp",
@@ -57,7 +55,7 @@ class GammaSync:
         self.store = store
 
     async def sync_markets(self) -> list[MarketRow]:
-        """拉取并持久化足球/NBA 相关市场。"""
+        """拉取并持久化足球/NBA/MLB/NHL/NFL 相关市场。"""
         client = await self.proxy.get_httpx_client()
         markets: list[MarketRow] = []
 
@@ -65,6 +63,9 @@ class GammaSync:
         for sport_filter, sport_name in [
             ("nba", "nba"),
             ("football", "football"),
+            ("mlb", "mlb"),
+            ("nhl", "nhl"),
+            ("nfl", "nfl"),
         ]:
             if sport_name not in self.cfg.sports and sport_filter not in self.cfg.sports:
                 continue
@@ -160,6 +161,9 @@ class GammaSync:
 
         is_nba = "nba" in event_tags
         is_fb = "soccer" in event_tags
+        is_mlb = "mlb" in event_tags or "baseball" in event_tags
+        is_nhl = "nhl" in event_tags or "hockey" in event_tags
+        is_nfl = "nfl" in event_tags or "american-football" in event_tags
         if sport == "nba" and any(h in text for h in NBA_EXCLUDE_HINTS):
             return None
         if sport == "football" and any(h in text for h in FOOTBALL_EXCLUDE_HINTS):
@@ -174,6 +178,18 @@ class GammaSync:
         # 期货盘不带。用它做正向过滤即可放行世界杯/国际友谊赛/J联赛/西乙等所有单场，
         # 同时挡掉期货盘——比写死联赛白名单覆盖面大得多，避免漏掉 PM 实际开的盘。
         if sport == "football" and "games" not in event_tags:
+            return None
+        if sport == "mlb" and not is_mlb:
+            return None
+        if sport == "mlb" and "games" not in event_tags:
+            return None
+        if sport == "nhl" and not is_nhl:
+            return None
+        if sport == "nhl" and "games" not in event_tags:
+            return None
+        if sport == "nfl" and not is_nfl:
+            return None
+        if sport == "nfl" and "games" not in event_tags:
             return None
 
         # 解析 token ids
@@ -202,7 +218,7 @@ class GammaSync:
         # 一些盘口问题本身没有对阵信息，回退用 event title 提取
         if not team_a or not team_b:
             team_a, team_b = self._teams_from_question(event_title)
-        # 仅保留可识别双方队名的“单场对阵”市场
+        # 仅保留可识别双方队名的"单场对阵"市场
         if not team_a or not team_b:
             return None
         # 仅保留近期比赛，避免把很久以前的盘子加入候选

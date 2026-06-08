@@ -58,9 +58,13 @@ class AppConfig(BaseModel):
     rate_api_football_per_min: int = 10
     rate_thesportsdb_per_min: int = 30
     rate_balldontlie_per_min: int = 5
-    rate_espn_per_min: int = 40
+    # ESPN 三个运动端点共享此限速（soccer + NBA + NFL 合计不超过该值/分钟）
+    rate_espn_per_min: int = 60
     rate_openligadb_per_min: int = 15
     rate_nba_api_per_min: int = 10
+    # MLB / NHL 官方免费 API（各自独立限速）
+    rate_mlb_per_min: int = 30
+    rate_nhl_per_min: int = 30
     # API-Football 免费层每日配额保护（10/min 之外再叠加每日上限）
     api_football_daily_quota: int = 95
 

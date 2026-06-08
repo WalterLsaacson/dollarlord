@@ -11,6 +11,9 @@ from typing import Literal
 class SportType(str, Enum):
     FOOTBALL = "football"
     NBA = "nba"
+    MLB = "mlb"
+    NHL = "nhl"
+    NFL = "nfl"
 
 
 class FixtureStatus(str, Enum):

@@ -37,15 +37,18 @@ rate_football_data_per_min: 10
 rate_api_football_per_min: 10
 rate_thesportsdb_per_min: 30
 rate_balldontlie_per_min: 5
+# ESPN soccer + NBA + NFL 三端共享此额度（单令牌桶）
 rate_espn_per_min: 60
 rate_openligadb_per_min: 15
 rate_nba_api_per_min: 10
+rate_mlb_per_min: 30
+rate_nhl_per_min: 30
 api_football_daily_quota: 95
 
 # API key 也可写在项目根 polymarket-arb.env（优先于 YAML）
 thesportsdb_key: "123"
 
-sports: [football, nba]
+sports: [football, nba, mlb, nhl]
 
 espn_soccer_leagues:
   - fifa.friendly

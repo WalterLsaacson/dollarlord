@@ -48,7 +48,20 @@ def normalize_team(name: str, store: Store, sport: str) -> str:
     return store.resolve_alias(s, sport)
 
 
-def _team_eq(x: str, y: str) -> bool:
+_SPORT_MAP: dict[str, tuple[str, SportType]] = {
+    "nba": ("nba", SportType.NBA),
+    "mlb": ("mlb", SportType.MLB),
+    "nhl": ("nhl", SportType.NHL),
+    "nfl": ("nfl", SportType.NFL),
+}
+
+
+def _sport_key_and_type(sport: str) -> tuple[str, SportType]:
+    """sport 字符串 → (normalize 用 key, SportType)。"""
+    return _SPORT_MAP.get(sport, ("football", SportType.FOOTBALL))
+
+
+
     """单队名是否等价：完全相等或较长队名间的子串包含。"""
     if not x or not y:
         return False
@@ -88,7 +101,7 @@ class ReverseMatcher:
         """尝试为市场建立 match_key。"""
         if not team_a or not team_b:
             return None
-        sport_key = "nba" if sport == "nba" else "football"
+        sport_key, _ = _sport_key_and_type(sport)
         ta = normalize_team(team_a, self.store, sport_key)
         tb = normalize_team(team_b, self.store, sport_key)
         match_key = f"{sport_key}:{ta}:{tb}"
@@ -122,10 +135,9 @@ class ReverseMatcher:
         """用当前赛果列表反向匹配市场（须开球时间对齐，避免同名不同日）。"""
         if not team_a or not team_b:
             return None
-        sport_key = "nba" if sport == "nba" else "football"
+        sport_key, expected_type = _sport_key_and_type(sport)
         ta = normalize_team(team_a, self.store, sport_key)
         tb = normalize_team(team_b, self.store, sport_key)
-        expected_type = SportType.NBA if sport == "nba" else SportType.FOOTBALL
         row = self.store.get_market(market_id)
         market_ko = parse_market_kickoff(row)
         now = datetime.now(timezone.utc)
@@ -193,8 +205,7 @@ class ReverseMatcher:
         if not team_a or not team_b:
             return None
         sport = str(row["sport"] or "football")
-        sport_key = "nba" if sport == "nba" else "football"
-        expected_type = SportType.NBA if sport == "nba" else SportType.FOOTBALL
+        sport_key, expected_type = _sport_key_and_type(sport)
         ta = normalize_team(str(team_a), self.store, sport_key)
         tb = normalize_team(str(team_b), self.store, sport_key)
         market_ko = parse_market_kickoff(row)

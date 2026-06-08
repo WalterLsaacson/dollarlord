@@ -89,6 +89,7 @@ class FixtureAggregator:
             if f.period is not None:
                 return f.period >= self.cfg.nba_min_period
             return False
+        # MLB / NHL / NFL：仅终局赛果触发下单，不走直播早进场
         return False
 
     def ingest(self, updates: list[FixtureUpdate]) -> list[FinalEvent]:
