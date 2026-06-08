@@ -44,11 +44,18 @@ rate_nba_api_per_min: 10
 rate_mlb_per_min: 30
 rate_nhl_per_min: 30
 api_football_daily_quota: 95
+# 电竞数据源限流（PandaScore CS2+LoL 共享桶，1000次/小时免费额度）
+rate_pandascore_per_min: 15
+rate_lolesports_per_min: 20
 
 # API key 也可写在项目根 polymarket-arb.env（优先于 YAML）
 thesportsdb_key: "123"
+# pandascore_key: ""        # 注册 pandascore.co 后填入，或设置 PANDASCORE_KEY 环境变量
+# lolesports_api_key: ""    # 默认使用前端内嵌 key，可按需更新
 
 sports: [football, nba, mlb, nhl]
+# 电竞：需在 pandascore.co 注册免费 API Key 后启用
+# sports: [football, nba, mlb, nhl, cs2, lol]
 
 espn_soccer_leagues:
   - fifa.friendly

@@ -66,6 +66,8 @@ class GammaSync:
             ("mlb", "mlb"),
             ("nhl", "nhl"),
             ("nfl", "nfl"),
+            ("cs2", "cs2"),
+            ("lol", "lol"),
         ]:
             if sport_name not in self.cfg.sports and sport_filter not in self.cfg.sports:
                 continue
@@ -155,8 +157,8 @@ class GammaSync:
             return None
 
         market_type = (m.get("sportsMarketType") or "").lower()
-        # 仅保留主胜负盘，避免 O/U、让分等不适配当前策略的盘口
-        if market_type and market_type not in {"moneyline"}:
+        # 电竞市场 PM 通常不标注 sportsMarketType，跳过该过滤；传统体育仅保留 moneyline
+        if market_type and market_type not in {"moneyline"} and sport not in ("cs2", "lol"):
             return None
 
         is_nba = "nba" in event_tags
@@ -164,6 +166,8 @@ class GammaSync:
         is_mlb = "mlb" in event_tags or "baseball" in event_tags
         is_nhl = "nhl" in event_tags or "hockey" in event_tags
         is_nfl = "nfl" in event_tags or "american-football" in event_tags
+        is_cs2 = "cs2" in event_tags or "csgo" in event_tags or "counter-strike" in event_tags
+        is_lol = "lol" in event_tags or "league-of-legends" in event_tags
         if sport == "nba" and any(h in text for h in NBA_EXCLUDE_HINTS):
             return None
         if sport == "football" and any(h in text for h in FOOTBALL_EXCLUDE_HINTS):
@@ -190,6 +194,14 @@ class GammaSync:
         if sport == "nfl" and not is_nfl:
             return None
         if sport == "nfl" and "games" not in event_tags:
+            return None
+        if sport == "cs2" and not is_cs2:
+            return None
+        if sport == "cs2" and "games" not in event_tags:
+            return None
+        if sport == "lol" and not is_lol:
+            return None
+        if sport == "lol" and "games" not in event_tags:
             return None
 
         # 解析 token ids

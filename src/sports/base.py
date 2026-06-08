@@ -14,6 +14,8 @@ class SportType(str, Enum):
     MLB = "mlb"
     NHL = "nhl"
     NFL = "nfl"
+    CS2 = "cs2"
+    LOL = "lol"
 
 
 class FixtureStatus(str, Enum):

@@ -26,8 +26,8 @@ _STRIP_SUFFIX = re.compile(
     r"\b(fc|cf|sc|afc|united|city|club|deportivo)\b",
     re.I,
 )
-# “Will X win on …?” 盘口：Yes = 题干队 X 赢
-_WILL_WIN = re.compile(r"^will\s+(.+?)\s+win\b", re.I)
+# “Will X win/beat/defeat …?” 盘口：Yes = 题干队 X 赢（兼容电竞 beat/defeat 格式）
+_WILL_WIN = re.compile(r”^will\s+(.+?)\s+(?:win|beat|defeat)\b”, re.I)
 # 「… end in a draw?」专用平局盘
 _DRAW_MARKET = re.compile(r"end in a draw\??\s*$", re.I)
 
@@ -53,6 +53,8 @@ _SPORT_MAP: dict[str, tuple[str, SportType]] = {
     "mlb": ("mlb", SportType.MLB),
     "nhl": ("nhl", SportType.NHL),
     "nfl": ("nfl", SportType.NFL),
+    "cs2": ("cs2", SportType.CS2),
+    "lol": ("lol", SportType.LOL),
 }
 
 

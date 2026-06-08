@@ -30,9 +30,11 @@ from src.sports.espn_nba import EspnNbaProvider
 from src.sports.espn_nfl import EspnNflProvider
 from src.sports.espn_soccer import EspnSoccerProvider
 from src.sports.football_data import FootballDataProvider
+from src.sports.lolesports_api import LolesportsApiProvider
 from src.sports.mlb_statsapi import MlbStatsApiProvider
 from src.sports.nhl_api import NhlApiProvider
 from src.sports.openligadb import OpenLigaDbProvider
+from src.sports.pandascore import PandascoreProvider
 from src.sports.thesportsdb import TheSportsDbProvider
 from src.store.sqlite import Store
 
@@ -76,6 +78,11 @@ class ArbApp:
             "mlb_statsapi": AsyncRateLimiter(cfg.rate_mlb_per_min, 60.0, "mlb_statsapi"),
             "nhl_api": AsyncRateLimiter(cfg.rate_nhl_per_min, 60.0, "nhl_api"),
         }
+        # PandaScore CS2+LoL 共享同一令牌桶（免费层 1000次/小时）
+        _pandascore_shared = AsyncRateLimiter(cfg.rate_pandascore_per_min, 60.0, "pandascore_shared")
+        self.limiters["pandascore_cs2"] = _pandascore_shared
+        self.limiters["pandascore_lol"] = _pandascore_shared
+        self.limiters["lolesports_api"] = AsyncRateLimiter(cfg.rate_lolesports_per_min, 60.0, "lolesports_api")
 
         # ---- 足球数据源（全部接入，各自限流）----
         self.espn_soccer = EspnSoccerProvider(cfg, self.proxy, self.store, self.limiters["espn_soccer"])
@@ -93,6 +100,18 @@ class ArbApp:
         self.nhl_api = NhlApiProvider(self.proxy, self.store, self.limiters["nhl_api"])
         self.espn_nfl = EspnNflProvider(self.proxy, self.store, self.limiters["espn_nfl"])
 
+        # ---- 电竞数据源（CS2 + LoL）----
+        from src.sports.base import SportType
+        self.pandascore_cs2 = PandascoreProvider(
+            cfg, self.proxy, self.store, self.limiters["pandascore_cs2"],
+            game="csgo", sport_type=SportType.CS2,
+        )
+        self.pandascore_lol = PandascoreProvider(
+            cfg, self.proxy, self.store, self.limiters["pandascore_lol"],
+            game="lol", sport_type=SportType.LOL,
+        )
+        self.lolesports_api = LolesportsApiProvider(cfg, self.proxy, self.store, self.limiters["lolesports_api"])
+
         # 按运动归类的数据源列表（TheSportsDB 同时覆盖足球+篮球）
         self.football_sources = [
             self.espn_soccer,
@@ -108,6 +127,8 @@ class ArbApp:
         self.mlb_sources = [self.mlb_statsapi]
         self.nhl_sources = [self.nhl_api]
         self.nfl_sources = [self.espn_nfl]
+        self.cs2_sources = [self.pandascore_cs2]
+        self.lol_sources = [self.pandascore_lol, self.lolesports_api]
 
         self._stop = asyncio.Event()
         self._has_live_fixtures = False
@@ -124,6 +145,8 @@ class ArbApp:
             ("mlb", self.mlb_sources),
             ("nhl", self.nhl_sources),
             ("nfl", self.nfl_sources),
+            ("cs2", self.cs2_sources),
+            ("lol", self.lol_sources),
         ]:
             if sport_key not in self.cfg.sports:
                 continue
@@ -230,6 +253,12 @@ class ArbApp:
             self.thesportsdb,
             self.espn_nba,
             self.balldontlie,
+            self.mlb_statsapi,
+            self.nhl_api,
+            self.espn_nfl,
+            self.pandascore_cs2,
+            self.pandascore_lol,
+            self.lolesports_api,
         ]
         for src in providers:
             sid = src.source_id

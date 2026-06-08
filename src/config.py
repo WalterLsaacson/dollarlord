@@ -65,8 +65,14 @@ class AppConfig(BaseModel):
     # MLB / NHL 官方免费 API（各自独立限速）
     rate_mlb_per_min: int = 30
     rate_nhl_per_min: int = 30
-    # API-Football 免费层每日配额保护（10/min 之外再叠加每日上限）
-    api_football_daily_quota: int = 95
+    # ---- 电竞数据源 ----
+    # PandaScore 免费注册获取（pandascore.co），CS2+LoL 共用同一 key
+    pandascore_key: str = ""
+    # LoL Esports 半官方 API key（Riot 前端内嵌，可在 lolesports.com DevTools 更新）
+    lolesports_api_key: str = ""
+    # 电竞 rate limits（PandaScore CS2+LoL 共享桶，勿超 1000次/小时）
+    rate_pandascore_per_min: int = 15
+    rate_lolesports_per_min: int = 20
 
     # ---- 各数据源 API key（留空则该源自动禁用；可用环境变量覆盖）----
     football_data_api_key: str = ""
