@@ -82,12 +82,16 @@ def create_app(hub: DashboardHub) -> FastAPI:
         async def _fetch() -> dict[str, Any]:
             items = await app_ref.redeem.list_settlement_candidates(winner_only=False)
             w3 = app_ref.redeem._web3()
+            try:
+                chain_ok = w3.is_connected()
+            except Exception:
+                chain_ok = False
             return {
                 "items": items,
                 "enabled": app_ref.redeem.enabled(),
                 "auto_redeem": app_ref.cfg.auto_redeem_enabled,
                 "threshold_pct": round(app_ref.cfg.redeem_price_threshold * 100, 1),
-                "chain_ok": w3.is_connected(),
+                "chain_ok": chain_ok,
             }
 
         return await _fetch()

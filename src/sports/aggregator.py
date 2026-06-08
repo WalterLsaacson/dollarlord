@@ -63,7 +63,8 @@ class FixtureAggregator:
     def is_eligible_for_early_entry(self, f: FixtureUpdate) -> bool:
         """判断该场比赛是否已进入“可早进场”阶段。
 
-        - 足球：进行中且开赛 80 分钟后（优先真实比赛分钟，无则墙钟兜底）。
+        - 足球：进行中且开赛 80 分钟后（优先真实比赛分钟，无则墙钟兜底）；
+          或净胜球分差 > football_blowout_lead 时立即武装（不等 80 分钟）。
         - NBA：默认不参与早进场，仅终局(FINAL) 走 on_final 下单；若开启 nba_early_entry_enabled 则第四节后可武装。
         """
         if f.status == FixtureStatus.FINAL:
@@ -71,6 +72,10 @@ class FixtureAggregator:
         if f.status != FixtureStatus.LIVE:
             return False
         if f.sport == SportType.FOOTBALL:
+            # 大比分领先（净胜球 > football_blowout_lead）：胜负基本锁定，立即武装，不等 80 分钟
+            if f.home_score is not None and f.away_score is not None:
+                if abs(f.home_score - f.away_score) > self.cfg.football_blowout_lead:
+                    return True
             if f.elapsed_minute is not None:
                 return f.elapsed_minute >= self.cfg.football_min_elapsed_min
             wc = f.match_minute_estimate()

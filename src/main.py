@@ -97,7 +97,7 @@ class ArbApp:
         self._has_live_fixtures = False
         self._config_path = "config.yaml"
         self._dashboard_hub = None
-        self._last_watchlist_count = 0
+        self._last_watchlist_ids: frozenset[str] = frozenset()
 
     async def _fetch_all_fixtures(self) -> list:
         """汇总所有已启用数据源的最新赛事更新（各源内部已限流）。"""
@@ -270,9 +270,9 @@ class ArbApp:
 
     def _maybe_emit_watchlist_changed(self) -> None:
         wl = self.store.list_active_watchlist()
-        count = len(wl)
-        if count != self._last_watchlist_count:
-            self._last_watchlist_count = count
+        ids = frozenset(row["market_id"] for row in wl)
+        if ids != self._last_watchlist_ids:
+            self._last_watchlist_ids = ids
             from src.dashboard.bus import emit_event
 
             emit_event("watchlist.changed", {"page": 1})

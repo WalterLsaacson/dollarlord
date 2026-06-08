@@ -9,9 +9,9 @@ proxy:
   http_url: "http://127.0.0.1:1082"
 
 entry_max_price: 0.99
-# 小资金账户示例：10 USDC
-max_round_notional_usd: 10
-order_ladder_usd: [10, 5]
+# 单场最大买入 20 USDC，逐级 FOK：20 → 10 → 5
+max_round_notional_usd: 20
+order_ladder_usd: [20, 10, 5]
 min_ladder_step_usd: 5
 market_cooldown_sec: 3600
 
@@ -20,6 +20,8 @@ early_entry_enabled: true
 # 买入窗口：卖价在 [early_entry_price, entry_max_price] 内即下单（默认 0.60~0.99）
 early_entry_price: 0.60
 football_min_elapsed_min: 80
+# 净胜球分差 > 此值时立即买入领先方，不等 80 分钟（2 → 分差≥3 触发）
+football_blowout_lead: 2
 football_fallback_wallclock_min: 95
 # NBA 默认 false：仅终局赛果下单；true 则第四节起可走直播早进场
 nba_early_entry_enabled: false

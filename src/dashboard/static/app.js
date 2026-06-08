@@ -242,6 +242,9 @@
 
   function prependHistory(item) {
     state.history.items.unshift(item);
+    if (state.history.items.length > 10) {
+      state.history.items.length = 10;
+    }
     state.history.total += 1;
     renderHistory();
   }
@@ -255,11 +258,17 @@
       hint.textContent = "结算未启用：需 live 模式 + polymarket-arb.env 中 FUNDER/PK，并 pip install -e \".[live]\"";
       return;
     }
-    let hintText = `自动结算：${p.auto_redeem ? "开" : "关"} · 触发阈值 ${p.threshold_pct}% · 仅展示链上真实份额`;
+    let hintText = `自动结算：${p.auto_redeem ? "开" : "关"} · 触发阈值 ${p.threshold_pct}%`;
     if (p.chain_ok === false) {
-      hintText += " · Polygon RPC 不可用，暂不展示持仓";
+      hintText += " · Polygon RPC 不可用，份额未链上确认（结算需 RPC 恢复）";
     }
     hint.textContent = hintText;
+    if (!(p.items || []).length) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="5" style="text-align:center;opacity:.6">暂无持仓</td>`;
+      tbody.appendChild(tr);
+      return;
+    }
     for (const row of p.items || []) {
       const tr = document.createElement("tr");
       const label = row.question || row.title || "—";
@@ -272,10 +281,11 @@
             : row.redeemable
               ? "待定价"
               : "—";
+      const chainMark = row.chain_confirmed === false ? " *" : "";
       const canRedeem = row.can_settle && !row.already_redeemed;
       tr.innerHTML = `
         <td title="${escapeHtml(label)}">${escapeHtml(label.slice(0, 48))}</td>
-        <td>${row.size ?? "—"}</td>
+        <td>${row.size ?? "—"}${chainMark}</td>
         <td>${row.cur_price_pct ?? "—"}</td>
         <td>${status}</td>
         <td>${

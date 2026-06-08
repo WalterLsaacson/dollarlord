@@ -53,6 +53,26 @@ def _watchlist_sort_key(item: dict[str, Any]) -> tuple:
     return (armed, traded, live, _parse_game_start(item.get("game_start_time")))
 
 
+def _is_finished_item(item: dict[str, Any]) -> bool:
+    """该 watchlist 行对应的比赛是否已完赛（fixture 终局）。"""
+    fx = item.get("fixture") or {}
+    return fx.get("status") == FixtureStatus.FINAL.value
+
+
+def _is_stale_item(item: dict[str, Any], grace_hours: float) -> bool:
+    """开赛后超过 grace 窗口且非直播中 → 视为已结束，不再展示。
+
+    bot 重启后 aggregator._live 为空，FINAL 过滤失效；此处用时间兜底。
+    """
+    start_ts = _parse_game_start(item.get("game_start_time"))
+    if start_ts == float("inf"):
+        return False  # 无开赛时间，保留
+    if start_ts < time.time() - grace_hours * 3600:
+        fx = item.get("fixture") or {}
+        return fx.get("status") != FixtureStatus.LIVE.value
+    return False
+
+
 def _fixture_to_dict(f: FixtureUpdate) -> dict[str, Any]:
     return {
         "match_key": f"{f.sport.value}:{f.normalized_home()}:{f.normalized_away()}",
@@ -115,15 +135,16 @@ class DashboardHub:
             patches = self._build_fixture_patches(payload)
             if patches:
                 await self.broadcast({"type": "watchlist.patch", "items": patches})
-            focus = self.build_focus()
-            if focus:
-                await self.broadcast({"type": "focus.updated", "data": focus})
+            # 比赛终局：从 watchlist 移除已完赛行
+            fx = payload.get("fixture") or {}
+            if fx.get("status") == FixtureStatus.FINAL.value:
+                self.invalidate_watchlist_cache()
+                await self.broadcast({"type": "watchlist.full", "data": self.build_watchlist()})
+            await self.broadcast({"type": "focus.updated", "data": self.build_focus()})
         elif event_type == "watchlist.armed":
             await self.broadcast({"type": "watchlist.armed", "data": payload})
             await self._push_status()
-            focus = self.build_focus()
-            if focus:
-                await self.broadcast({"type": "focus.updated", "data": focus})
+            await self.broadcast({"type": "focus.updated", "data": self.build_focus()})
         elif event_type == "book.updated":
             self._schedule_book_push(payload)
         elif event_type == "watchlist.changed":
@@ -162,6 +183,12 @@ class DashboardHub:
 
     def _market_fixture(self, row: Any) -> FixtureUpdate | None:
         """匹配赛果快照（须开球对齐，避免未来盘显示历史比分）。"""
+        # 比赛尚未开始：不显示任何 fixture 数据（防止复用历史对战比分）
+        gst = row["game_start_time"] if hasattr(row, "__getitem__") else None
+        if gst:
+            start_ts = _parse_game_start(gst)
+            if start_ts != float("inf") and start_ts > time.time() + 600:
+                return None
         return self._app.matcher.pick_fixture_for_market(
             row, self._app.aggregator.live_fixtures()
         )
@@ -190,16 +217,23 @@ class DashboardHub:
         return item
 
     def _get_enriched_watchlist(self) -> list[dict[str, Any]]:
-        """带 TTL 的 watchlist 富化缓存。"""
+        """带 TTL 的 watchlist 富化缓存（全部 watching，排除已完赛）。"""
         now = time.monotonic()
         if (
             self._watchlist_cache is not None
             and now - self._watchlist_cache_at < self._watchlist_cache_ttl
         ):
             return self._watchlist_cache
-        rows = self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours)
+        # 全部 watching（不限 grace 小时）→ 展示更完整；done/已成交不在此列
+        rows = self._app.store.list_active_watchlist()
         traded_ids = self._app.store.list_traded_market_ids()
+        grace = self._app.cfg.watchlist_grace_hours
         enriched = [self._enrich_market_row(r, traded_ids) for r in rows]
+        # 已完赛（fixture 终局）或超时未直播 → 不再展示
+        enriched = [
+            it for it in enriched
+            if not _is_finished_item(it) and not _is_stale_item(it, grace)
+        ]
         enriched.sort(key=_watchlist_sort_key)
         self._watchlist_cache = enriched
         self._watchlist_cache_at = now
@@ -217,23 +251,36 @@ class DashboardHub:
         return self.build_watchlist()
 
     def build_focus(self) -> dict[str, Any] | None:
-        """焦点比赛：当前最可能触发买入的监听场次（ARMED 优先，其次直播中，否则最近开赛）。"""
-        rows = self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours)
-        if not rows:
-            return None
-        candidates: list[tuple[int, Any]] = []
+        """焦点比赛：下一场要监听/买入的比赛。
+
+        优先级：ARMED（即将下单）> 直播中 > 最近即将开赛；已完赛/已成交不参与。
+        """
+        rows = self._app.store.list_active_watchlist()
+        now = time.time()
+        grace = self._app.cfg.watchlist_grace_hours
+        candidates: list[tuple[tuple[int, float], dict[str, Any]]] = []
         for row in rows:
             item = self._enrich_market_row(row)
-            fixture = item.get("fixture")
-            score = 0
-            if item["armed"]:
-                score += 100
-            if fixture and fixture.get("status") == FixtureStatus.LIVE.value:
-                score += 50
+            if _is_finished_item(item) or _is_stale_item(item, grace):
+                continue
+            fixture = item.get("fixture") or {}
+            status = fixture.get("status")
             start_ts = _parse_game_start(row["game_start_time"])
-            candidates.append((score * 1e12 - start_ts, item))
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1] if candidates else None
+            if item["armed"]:
+                key = (0, start_ts)
+            elif status == FixtureStatus.LIVE.value:
+                key = (1, start_ts)
+            elif start_ts >= now:
+                # 即将开赛：越近越优先
+                key = (2, start_ts)
+            else:
+                # 已过开赛但无直播数据：越新越优先
+                key = (3, -start_ts)
+            candidates.append((key, item))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
 
     def _build_health_item(self, sid: str) -> dict[str, Any]:
         """组装单个健康检查卡片（含未配置 Key / 等待拉取状态）。"""
@@ -327,16 +374,15 @@ class DashboardHub:
             "geoblocked": app.risk.geoblocked,
             "live_paused": app.risk.live_paused,
             "armed_count": len(app.signals._armed),
-            "watchlist_total": self._watchlist_total
-            or len(self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours)),
+            "watchlist_total": self._watchlist_total or len(self._get_enriched_watchlist()),
             "auto_redeem_enabled": app.cfg.auto_redeem_enabled,
             "redeem_enabled": app.redeem.enabled(),
         }
 
     def build_history(self) -> dict[str, Any]:
-        """返回完整成交/错过列表（无分页）。"""
-        items = self._app.store.list_merged_history_all()
-        return {"items": items, "total": len(items)}
+        """返回最近 10 条成交/错过列表。"""
+        items, total = self._app.store.list_merged_history(page=1, page_size=10)
+        return {"items": items, "total": total}
 
     def build_snapshot(self) -> dict[str, Any]:
         return {
@@ -421,7 +467,7 @@ class DashboardHub:
         if not match_key:
             return []
         patches: list[dict[str, Any]] = []
-        for row in self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours):
+        for row in self._app.store.list_active_watchlist():
             item = self._enrich_market_row(row)
             fx = item.get("fixture")
             if fx and fx.get("match_key") == match_key:
@@ -430,7 +476,7 @@ class DashboardHub:
 
     def _build_book_patches(self, pending: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         patches: list[dict[str, Any]] = []
-        for row in self._app.store.list_future_watchlist(self._app.cfg.watchlist_grace_hours):
+        for row in self._app.store.list_active_watchlist():
             mid = row["market_id"]
             yes_t = row["token_yes"]
             no_t = row["token_no"]

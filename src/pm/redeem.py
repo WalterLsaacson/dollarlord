@@ -424,11 +424,18 @@ class RedeemService:
         *,
         winner_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """返回链上仍有份额的真实持仓（非历史结算记录）。"""
+        """返回当前代理钱包持仓（以 Data API 为准，链上份额仅作精修）。
+
+        链上 RPC 不可用时不再清空列表：展示 Data API 持仓 size，
+        chain_confirmed=False 以提示份额未链上确认。
+        """
         positions = await self.fetch_positions()
         proxy = self._proxy_wallet()
         w3 = self._web3()
-        chain_ok = w3.is_connected()
+        try:
+            chain_ok = w3.is_connected()
+        except Exception:
+            chain_ok = False
 
         by_cond: dict[str, PositionView] = {}
         for p in positions:
@@ -437,16 +444,23 @@ class RedeemService:
 
         items: list[dict[str, Any]] = []
         for p in by_cond.values():
-            # 必须链上确认份额，避免 Data API 返回已清空的历史持仓
-            if not chain_ok:
-                continue
-            chain_raw = await asyncio.to_thread(
-                self._ctf_balance, w3, proxy, p.asset
-            )
-            if chain_raw <= 0:
-                continue
-            chain_size = chain_raw / _CTF_DECIMALS
-            if chain_size < 0.01:
+            size = p.size
+            chain_confirmed = False
+            if chain_ok:
+                try:
+                    chain_raw = await asyncio.to_thread(
+                        self._ctf_balance, w3, proxy, p.asset
+                    )
+                    chain_confirmed = True
+                    # 链上已确认份额为 0：真实已清空（已结算/转出），不展示
+                    if chain_raw <= 0:
+                        continue
+                    size = chain_raw / _CTF_DECIMALS
+                except Exception:
+                    # 单次链上查询失败：退回 Data API size，仍然展示
+                    chain_confirmed = False
+
+            if size < 0.01:
                 continue
 
             can_settle = self._can_settle(p)
@@ -460,7 +474,7 @@ class RedeemService:
                     "question": question,
                     "title": question,
                     "outcome": p.title,
-                    "size": round(chain_size, 4),
+                    "size": round(size, 4),
                     "cur_price": p.cur_price,
                     "cur_price_pct": round(p.cur_price * 100, 1),
                     "redeemable": p.redeemable,
@@ -468,6 +482,7 @@ class RedeemService:
                     "is_winner": self._is_winner(p),
                     "negative_risk": p.negative_risk,
                     "already_redeemed": self.store.is_condition_redeemed(p.condition_id),
+                    "chain_confirmed": chain_confirmed,
                     "slug": p.slug,
                 }
             )

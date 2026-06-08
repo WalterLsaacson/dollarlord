@@ -37,6 +37,8 @@ class AppConfig(BaseModel):
     early_entry_price: float = 0.60
     # 足球：开赛多少分钟后才允许进入轮询/下单（之前悬念较大，不参与）
     football_min_elapsed_min: int = 80
+    # 足球：净胜球分差 > 此值时立即武装买入领先方，不必等 80 分钟（大比分基本锁定胜负）
+    football_blowout_lead: int = 3
     # 足球：拿不到真实比赛分钟时，用开赛后的墙钟分钟兜底（含中场休息缓冲）
     football_fallback_wallclock_min: int = 95
     # NBA：默认不等第四节直播价，仅终局赛果触发下单（见 nba_early_entry_enabled）
