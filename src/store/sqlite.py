@@ -197,7 +197,12 @@ class Store:
             ON CONFLICT(market_id) DO UPDATE SET
                 closed=excluded.closed,
                 uma_status=excluded.uma_status,
-                watch_state=excluded.watch_state,
+                -- Gamma 同步勿覆盖 matcher 已建立的监听/完成状态
+                watch_state=CASE
+                    WHEN markets.watch_state IN ('watching', 'done', 'conflict')
+                    THEN markets.watch_state
+                    ELSE excluded.watch_state
+                END,
                 fixture_key=COALESCE(excluded.fixture_key, markets.fixture_key),
                 matched_sources=COALESCE(excluded.matched_sources, markets.matched_sources),
                 updated_at=excluded.updated_at
