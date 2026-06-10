@@ -96,9 +96,10 @@ class ClobOrderbookFeed:
         self._books[token_id] = snap
         return snap
 
-    async def poll_loop(self, interval: float = 1.0) -> None:
-        """轮询已订阅 token 的订单簿。"""
+    async def poll_loop(self, interval: float | Callable[[], float] = 1.0) -> None:
+        """轮询已订阅 token 的订单簿；interval 可为数值或返回秒数的可调用对象。"""
         while True:
+            iv = interval() if callable(interval) else interval
             for token_id in list(self._subscribed):
                 try:
                     snap = await self.fetch_book_rest(token_id)
@@ -106,7 +107,7 @@ class ClobOrderbookFeed:
                         await cb(token_id, snap)
                 except Exception as e:
                     logger.debug("订单簿 %s 失败: %s", token_id[:16], e)
-            await asyncio.sleep(interval)
+            await asyncio.sleep(max(0.1, float(iv)))
 
     async def ws_loop(self) -> None:
         """WebSocket 订阅（带 SOCKS 代理）。"""

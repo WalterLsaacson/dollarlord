@@ -18,6 +18,74 @@ def _match_key(u: FixtureUpdate) -> str:
     return f"{u.sport.value}:{u.normalized_home()}:{u.normalized_away()}"
 
 
+def _pick_elapsed_minute(prev: FixtureUpdate | None, u: FixtureUpdate) -> int | None:
+    """多源合并时优先保留 API-Football 的精确比赛分钟（含补时）。"""
+    if u.source_id == "api_football" and u.elapsed_minute is not None:
+        return u.elapsed_minute
+    if prev and prev.source_id == "api_football" and prev.elapsed_minute is not None:
+        return prev.elapsed_minute
+    if u.elapsed_minute is not None:
+        return u.elapsed_minute
+    if prev:
+        return prev.elapsed_minute
+    return None
+
+
+def _pick_kickoff(prev: FixtureUpdate | None, u: FixtureUpdate) -> datetime | None:
+    """开球时间优先采用 API-Football（与 PM game_start_time 对齐更准）。"""
+    if u.source_id == "api_football" and u.kickoff_time is not None:
+        return u.kickoff_time
+    if prev and prev.source_id == "api_football" and prev.kickoff_time is not None:
+        return prev.kickoff_time
+    return u.kickoff_time or (prev.kickoff_time if prev else None)
+
+
+def _merge_live_updates(prev: FixtureUpdate, u: FixtureUpdate) -> FixtureUpdate:
+    """合并两场更新：比分/状态取较新观测；分钟与开球保留 API-Football 精度。"""
+    if u.observed_at < prev.observed_at:
+        return prev
+
+    # 终局状态优先
+    if u.status == FixtureStatus.FINAL or prev.status == FixtureStatus.FINAL:
+        status = FixtureStatus.FINAL
+        winner = u.winner if u.status == FixtureStatus.FINAL else prev.winner
+    elif u.status == FixtureStatus.LIVE or prev.status == FixtureStatus.LIVE:
+        status = FixtureStatus.LIVE
+        winner = None
+    else:
+        status = u.status
+        winner = u.winner
+
+    home_score = u.home_score if u.home_score is not None else prev.home_score
+    away_score = u.away_score if u.away_score is not None else prev.away_score
+
+    elapsed = _pick_elapsed_minute(prev, u)
+    kickoff = _pick_kickoff(prev, u)
+
+    # 分钟数以 API-Football 为准时，Dashboard 来源标签跟分钟源一致
+    minute_src = u if (u.source_id == "api_football" and u.elapsed_minute is not None) else (
+        prev if (prev.source_id == "api_football" and prev.elapsed_minute is not None) else u
+    )
+
+    return FixtureUpdate(
+        fixture_key=u.fixture_key or prev.fixture_key,
+        sport=u.sport,
+        source_id=minute_src.source_id,
+        home_team=u.home_team or prev.home_team,
+        away_team=u.away_team or prev.away_team,
+        status=status,
+        home_score=home_score,
+        away_score=away_score,
+        winner=winner,
+        observed_at=max(u.observed_at, prev.observed_at),
+        league=u.league or prev.league,
+        external_id=u.external_id or prev.external_id,
+        elapsed_minute=elapsed,
+        period=u.period if u.period is not None else prev.period,
+        kickoff_time=kickoff,
+    )
+
+
 @dataclass
 class FinalEvent:
     """终局事件（触发交易信号）。"""
@@ -63,8 +131,8 @@ class FixtureAggregator:
     def is_eligible_for_early_entry(self, f: FixtureUpdate) -> bool:
         """判断该场比赛是否已进入“可早进场”阶段。
 
-        - 足球：进行中且开赛 80 分钟后（优先真实比赛分钟，无则墙钟兜底）；
-          或净胜球分差 > football_blowout_lead 时立即武装（不等 80 分钟）。
+        - 足球（方案 B）：净胜球 ≥ football_blowout_lead 且已踢满 football_min_elapsed_min
+          才可直播买；一球领先任意时刻均不可直播（仅终局 on_final）。
         - NBA：默认不参与早进场，仅终局(FINAL) 走 on_final 下单；若开启 nba_early_entry_enabled 则第四节后可武装。
         """
         if f.status == FixtureStatus.FINAL:
@@ -72,16 +140,11 @@ class FixtureAggregator:
         if f.status != FixtureStatus.LIVE:
             return False
         if f.sport == SportType.FOOTBALL:
-            # 大比分领先（净胜球 > football_blowout_lead）：胜负基本锁定，立即武装，不等 80 分钟
-            if f.home_score is not None and f.away_score is not None:
-                if abs(f.home_score - f.away_score) > self.cfg.football_blowout_lead:
-                    return True
-            if f.elapsed_minute is not None:
-                return f.elapsed_minute >= self.cfg.football_min_elapsed_min
-            wc = f.match_minute_estimate()
-            if wc is not None:
-                return wc >= self.cfg.football_fallback_wallclock_min
-            return False
+            if not self.cfg.football_early_entry_enabled:
+                return False
+            from src.engine.football_live_entry import is_football_live_entry_eligible
+
+            return is_football_live_entry_eligible(f, self.cfg)
         if f.sport == SportType.NBA:
             # NBA 默认终局才下单，避免第四节未结束时误触发
             if not self.cfg.nba_early_entry_enabled:
@@ -95,12 +158,29 @@ class FixtureAggregator:
     def ingest(self, updates: list[FixtureUpdate]) -> list[FinalEvent]:
         """摄入更新，返回新触发的终局事件。"""
         new_events: list[FinalEvent] = []
-        for u in updates:
+
+        def _ingest_priority(u: FixtureUpdate) -> int:
+            # API-Football 终局优先入账，减少 ESPN 等慢源抢先触发
+            if (
+                u.status == FixtureStatus.FINAL
+                and u.winner
+                and u.source_id == "api_football"
+            ):
+                return 0
+            return 1
+
+        for u in sorted(updates, key=_ingest_priority):
             # 记录最新实时状态（不限于终局），供早进场资格判断
             key0 = _match_key(u)
             prev = self._live.get(key0)
-            if prev is None or u.observed_at >= prev.observed_at:
-                self._live[key0] = u
+            if prev is None:
+                merged = u
+            elif u.observed_at >= prev.observed_at:
+                merged = _merge_live_updates(prev, u)
+            else:
+                merged = None
+            if merged is not None:
+                self._live[key0] = merged
                 from src.dashboard.bus import emit_event
 
                 emit_event(
@@ -108,13 +188,14 @@ class FixtureAggregator:
                     {
                         "match_key": key0,
                         "fixture": {
-                            "home_team": u.home_team,
-                            "away_team": u.away_team,
-                            "home_score": u.home_score,
-                            "away_score": u.away_score,
-                            "status": u.status.value,
-                            "elapsed_minute": u.elapsed_minute,
-                            "period": u.period,
+                            "home_team": merged.home_team,
+                            "away_team": merged.away_team,
+                            "home_score": merged.home_score,
+                            "away_score": merged.away_score,
+                            "status": merged.status.value,
+                            "elapsed_minute": merged.elapsed_minute,
+                            "period": merged.period,
+                            "source_id": merged.source_id,
                         },
                     },
                 )

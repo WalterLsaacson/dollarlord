@@ -8,19 +8,33 @@ proxy:
   socks5_url: "socks5://127.0.0.1:1082"
   http_url: "http://127.0.0.1:1082"
 
+# CLOB live 限价最高 0.99；高于此配置无效且会误触发下单
 entry_max_price: 0.99
 # 单场最大买入 20 USDC，逐级 FOK：20 → 10 → 5
 max_round_notional_usd: 20
 order_ladder_usd: [20, 10, 5]
 min_ladder_step_usd: 5
 market_cooldown_sec: 3600
+# 终局拉订单簿：前 6 次每 2s 重试，之后每 8s，最多 12 次
+final_orderbook_max_attempts: 12
+final_orderbook_fast_attempts: 6
+final_orderbook_fast_retry_sec: 2
+final_orderbook_retry_interval_sec: 8
+
+# ---- 方向三：主攻终局抢单 + API-Football PRO ----
+final_snipe_enabled: true
+final_snipe_minute: 80
+final_snipe_poll_sec: 1
+final_snipe_clob_poll_sec: 0.8
+# 足球关闭方案 B 直播 ARM，只等终局 on_final 下单
+football_early_entry_enabled: false
 
 # ---- 价格驱动早进场策略（不死等 final）----
 early_entry_enabled: true
 # 买入窗口：卖价在 [early_entry_price, entry_max_price] 内即下单（默认 0.60~0.99）
 early_entry_price: 0.60
 football_min_elapsed_min: 80
-# 净胜球分差 > 此值时立即买入领先方，不等 80 分钟（2 → 分差≥3 触发）
+# 方案 B：净胜球 ≥ 2 且已 ≥80' 才直播买；1 球领先只等终局（85' 变 2-0 亦满足）
 football_blowout_lead: 2
 football_fallback_wallclock_min: 95
 # NBA 默认 false：仅终局赛果下单；true 则第四节起可走直播早进场
@@ -31,10 +45,15 @@ gamma_sync_interval_sec: 900
 sports_poll_live_sec: 2
 sports_poll_idle_sec: 60
 clob_eligible_poll_sec: 1.5
+clob_idle_poll_sec: 30
 
 # ---- 各数据源每分钟限流（分开计数）----
 rate_football_data_per_min: 10
-rate_api_football_per_min: 10
+# API-Football PRO：官方 300/min、7500/day；bot 内限速留余量
+rate_api_football_per_min: 120
+api_football_daily_quota: 7200
+# 当日赛程（终局补漏）最短间隔；live=all 每次轮询都拉（含精确比赛分钟）
+api_football_date_interval_sec: 20
 rate_thesportsdb_per_min: 30
 rate_balldontlie_per_min: 5
 # ESPN soccer + NBA + NFL 三端共享此额度（单令牌桶）
@@ -43,12 +62,12 @@ rate_openligadb_per_min: 15
 rate_nba_api_per_min: 10
 rate_mlb_per_min: 30
 rate_nhl_per_min: 30
-api_football_daily_quota: 95
 # 电竞数据源限流（PandaScore CS2+LoL 共享桶，1000次/小时免费额度）
 rate_pandascore_per_min: 15
 rate_lolesports_per_min: 20
 
 # API key 也可写在项目根 polymarket-arb.env（优先于 YAML）
+# 免费公共 key "123" 每天仅 ~3 场足球；Patreon key 才有完整覆盖
 thesportsdb_key: "123"
 # pandascore_key: ""        # 填入此处，或在 polymarket-arb.env 写 PANDASCORE_KEY=xxx
 # lolesports_api_key: ""    # 默认使用前端内嵌 key，可按需更新（或设置 LOLESPORTS_API_KEY）

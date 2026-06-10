@@ -52,11 +52,11 @@ def _parse_game_start(iso: str | None) -> float:
 
 
 def _watchlist_sort_key(item: dict[str, Any]) -> tuple:
-    """ARMED / 已成交 / 直播中优先，其余按开赛时间。"""
-    armed = 0 if item.get("armed") else 1
-    traded = 0 if item.get("has_trade") else 1
-    live = 0 if (item.get("fixture") or {}).get("status") == "live" else 1
-    return (armed, traded, live, _parse_game_start(item.get("game_start_time")))
+    """按开赛时间从近到远（越早开赛越靠前；无开赛时间排最后）。"""
+    start_ts = _parse_game_start(item.get("game_start_time"))
+    if start_ts == float("inf"):
+        return (1, float("inf"))
+    return (0, start_ts)
 
 
 def _is_finished_item(item: dict[str, Any]) -> bool:

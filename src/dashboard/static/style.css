@@ -167,6 +167,73 @@ body {
 .btn-mini:hover { background: #f1f5f9; }
 .tag.armed { background: #dbeafe; color: var(--accent); }
 
+/* Watchlist 运动类型：行底色 + 左侧色条 + 类型标签 */
+.watchlist-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.72rem;
+}
+.watchlist-legend-hint {
+  color: var(--muted);
+  margin-left: 0.25rem;
+}
+.sport-tag {
+  display: inline-block;
+  padding: 0.12rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.2;
+  border: 1px solid transparent;
+}
+.watchlist-table tbody tr {
+  border-left: 4px solid transparent;
+}
+.watchlist-table tbody tr.sport-football {
+  background: #f0fdf4;
+  border-left-color: #16a34a;
+}
+.watchlist-table tbody tr.sport-nba {
+  background: #fff7ed;
+  border-left-color: #ea580c;
+}
+.watchlist-table tbody tr.sport-mlb {
+  background: #eff6ff;
+  border-left-color: #1d4ed8;
+}
+.watchlist-table tbody tr.sport-nhl {
+  background: #ecfeff;
+  border-left-color: #0891b2;
+}
+.watchlist-table tbody tr.sport-nfl {
+  background: #f5f3ff;
+  border-left-color: #7c3aed;
+}
+.watchlist-table tbody tr.sport-cs2 {
+  background: #fef3c7;
+  border-left-color: #b45309;
+}
+.watchlist-table tbody tr.sport-lol {
+  background: #fdf2f8;
+  border-left-color: #db2777;
+}
+.watchlist-table tbody tr.sport-other {
+  background: #f8fafc;
+  border-left-color: var(--gray);
+}
+.sport-tag.sport-football { background: #dcfce7; color: #15803d; border-color: #86efac; }
+.sport-tag.sport-nba { background: #ffedd5; color: #c2410c; border-color: #fdba74; }
+.sport-tag.sport-mlb { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
+.sport-tag.sport-nhl { background: #cffafe; color: #0e7490; border-color: #67e8f9; }
+.sport-tag.sport-nfl { background: #ede9fe; color: #6d28d9; border-color: #c4b5fd; }
+.sport-tag.sport-cs2 { background: #fef3c7; color: #92400e; border-color: #fcd34d; }
+.sport-tag.sport-lol { background: #fce7f3; color: #be185d; border-color: #f9a8d4; }
+.sport-tag.sport-other { background: #f1f5f9; color: var(--muted); border-color: var(--border); }
+.watchlist-table tbody tr:hover { filter: brightness(0.98); }
+
 .pager {
   display: flex;
   align-items: center;

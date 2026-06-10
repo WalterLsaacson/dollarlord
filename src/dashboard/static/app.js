@@ -157,12 +157,30 @@
       </div>`;
   }
 
+  /** 运动类型 → 展示名与 CSS 类（Watchlist 配色） */
+  const SPORT_META = {
+    football: { label: "足球", cls: "sport-football" },
+    nba: { label: "NBA", cls: "sport-nba" },
+    mlb: { label: "MLB", cls: "sport-mlb" },
+    nhl: { label: "NHL", cls: "sport-nhl" },
+    nfl: { label: "NFL", cls: "sport-nfl" },
+    cs2: { label: "CS2", cls: "sport-cs2" },
+    lol: { label: "LoL", cls: "sport-lol" },
+  };
+
+  function sportMeta(sport) {
+    const key = (sport || "").toLowerCase();
+    return SPORT_META[key] || { label: sport || "—", cls: "sport-other" };
+  }
+
   function renderWatchlist() {
     const tbody = $("watchlist-body");
     tbody.innerHTML = "";
     for (const row of state.watchlist.items) {
       const tr = document.createElement("tr");
       tr.dataset.marketId = row.market_id;
+      const sm = sportMeta(row.sport);
+      tr.className = sm.cls;
       const fx = row.fixture || {};
       const score =
         fx.home_score != null && fx.away_score != null
@@ -179,6 +197,7 @@
       if (row.has_trade) statusTags.push('<span class="tag success">已成交</span>');
       tr.innerHTML = `
         <td>${fmtStart(row.game_start_time)}</td>
+        <td><span class="sport-tag ${sm.cls}">${sm.label}</span></td>
         <td>${row.team_a} vs ${row.team_b}</td>
         <td class="col-score">${score}</td>
         <td class="col-prog">${prog}</td>
@@ -242,9 +261,6 @@
 
   function prependHistory(item) {
     state.history.items.unshift(item);
-    if (state.history.items.length > 10) {
-      state.history.items.length = 10;
-    }
     state.history.total += 1;
     renderHistory();
   }

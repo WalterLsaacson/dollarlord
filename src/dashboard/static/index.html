@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Polymarket Arb Dashboard</title>
-  <link rel="stylesheet" href="/static/style.css?v=9" />
+  <link rel="stylesheet" href="/static/style.css?v=10" />
 </head>
 <body>
   <header class="header">
@@ -52,10 +52,21 @@
     <!-- Watchlist：全量展示，无翻页 -->
     <section class="panel panel-list-full">
       <h2>Watchlist <span id="watchlist-total" class="badge">0</span></h2>
-      <table class="data-table">
+      <div class="watchlist-legend" aria-label="运动类型图例">
+        <span class="sport-tag sport-football">足球</span>
+        <span class="sport-tag sport-nba">NBA</span>
+        <span class="sport-tag sport-mlb">MLB</span>
+        <span class="sport-tag sport-nhl">NHL</span>
+        <span class="sport-tag sport-nfl">NFL</span>
+        <span class="sport-tag sport-cs2">CS2</span>
+        <span class="sport-tag sport-lol">LoL</span>
+        <span class="watchlist-legend-hint">按开赛时间从近到远排序</span>
+      </div>
+      <table class="data-table watchlist-table">
         <thead>
           <tr>
             <th>开赛(北京)</th>
+            <th>类型</th>
             <th>对阵</th>
             <th>比分</th>
             <th>进度</th>
@@ -107,6 +118,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>

@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from src.config import AppConfig
+from src.config import CLOB_MAX_ORDER_PRICE, AppConfig
 from src.engine.risk import RiskManager
 from src.logging_setup import log_event
 from src.net.proxy import ProxyTransport
@@ -229,20 +229,21 @@ class LadderExecutor:
             _order_step_log(ctx, step="abort", reason="ask_below_clob_min", best_ask=book.best_ask)
             return LadderResult(False, 0, book.best_ask, "invalid_price", "ask < 0.01")
 
-        if book.best_ask > self.cfg.entry_max_price:
+        max_price = self.cfg.effective_entry_max_price()
+        if book.best_ask > max_price:
             _order_step_log(
                 ctx,
                 step="abort",
                 reason="ask_above_max",
                 best_ask=book.best_ask,
-                entry_max_price=self.cfg.entry_max_price,
+                entry_max_price=max_price,
             )
             return LadderResult(
                 False,
                 0,
                 book.best_ask,
                 "no_edge",
-                f"ask={book.best_ask} > max={self.cfg.entry_max_price}",
+                f"ask={book.best_ask} > max={max_price}",
             )
 
         if book.best_ask < self.cfg.early_entry_price:
@@ -261,7 +262,7 @@ class LadderExecutor:
                 f"ask={book.best_ask} < min={self.cfg.early_entry_price}",
             )
 
-        available = book.available_notional(self.cfg.entry_max_price)
+        available = book.available_notional(max_price)
         ctx["depth_usd"] = round(available, 4)
         if available < self.cfg.min_ladder_step_usd:
             _order_step_log(
@@ -368,8 +369,9 @@ class LadderExecutor:
         """模拟 FOK：检查深度是否足够。"""
         filled = 0.0
         cost = 0.0
+        max_price = self.cfg.effective_entry_max_price()
         for price, size in book.asks:
-            if price > self.cfg.entry_max_price:
+            if price > max_price:
                 break
             take_usd = min(amount_usd - cost, price * size)
             if take_usd <= 0:
@@ -381,7 +383,7 @@ class LadderExecutor:
                 break
 
         if filled >= amount_usd * 0.99:
-            avg_price = book.best_ask or self.cfg.entry_max_price
+            avg_price = book.best_ask or max_price
             return LadderResult(True, filled, avg_price, "paper_matched", "simulated FOK")
         return LadderResult(False, 0, book.best_ask or 0, "FOK_NOT_FILLED", "深度不足")
 
@@ -400,7 +402,9 @@ class LadderExecutor:
             from py_clob_client_v2 import MarketOrderArgs, OrderType, Side
             from py_clob_client_v2.clob_types import PartialCreateOrderOptions
 
-            price = min(self.cfg.entry_max_price, (book.best_ask or 0.99) + 0.01)
+            # FOK 限价须 ≤ CLOB 上限，且略高于 best_ask 以保证吃单
+            cap = self.cfg.effective_entry_max_price()
+            price = min(CLOB_MAX_ORDER_PRICE, cap, (book.best_ask or cap) + 0.01)
             price = round(price, 2)
 
             order_args = MarketOrderArgs(

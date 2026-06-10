@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+import httpx
+
 from src.config import AppConfig
 from src.net.proxy import ProxyTransport
 from src.net.rate_limit import AsyncRateLimiter
@@ -59,7 +61,6 @@ class FootballDataProvider:
         if not self.limiter.try_acquire():
             return self._last
 
-        client = await self.proxy.get_httpx_client()
         today = datetime.now(timezone.utc).date()
         params = {
             "dateFrom": today.isoformat(),
@@ -67,7 +68,14 @@ class FootballDataProvider:
         }
         headers = {"X-Auth-Token": self.cfg.football_data_api_key}
         try:
-            resp = await client.get(f"{FD_BASE}/matches", params=params, headers=headers)
+            client = await self.proxy.get_httpx_client()
+            try:
+                resp = await client.get(f"{FD_BASE}/matches", params=params, headers=headers)
+            except httpx.RemoteProtocolError:
+                # Stale keep-alive connection — reset and retry once
+                await self.proxy.aclose()
+                client = await self.proxy.get_httpx_client()
+                resp = await client.get(f"{FD_BASE}/matches", params=params, headers=headers)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:

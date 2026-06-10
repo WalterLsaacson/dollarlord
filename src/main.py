@@ -112,12 +112,12 @@ class ArbApp:
         )
         self.lolesports_api = LolesportsApiProvider(cfg, self.proxy, self.store, self.limiters["lolesports_api"])
 
-        # 按运动归类的数据源列表（TheSportsDB 同时覆盖足球+篮球）
+        # 按运动归类的数据源列表（足球 API-Football 优先，终局/分钟以 PRO 源为先）
         self.football_sources = [
+            self.api_football,
             self.espn_soccer,
             self.openligadb,
             self.football_data,
-            self.api_football,
             self.thesportsdb,
         ]
         self.nba_sources = [
@@ -132,12 +132,23 @@ class ArbApp:
 
         self._stop = asyncio.Event()
         self._has_live_fixtures = False
+        self._final_snipe_active = False
         self._config_path = "config.yaml"
         self._dashboard_hub = None
         self._last_watchlist_ids: frozenset[str] = frozenset()
 
+    async def _fetch_sport_fixtures(self, sources: list) -> list:
+        """拉取单一运动全部数据源更新。"""
+        out: list = []
+        for src in sources:
+            try:
+                out.extend(await src.fetch_updates())
+            except Exception as e:
+                logger.debug("数据源 %s 拉取异常: %s", getattr(src, "source_id", src), e)
+        return out
+
     async def _fetch_all_fixtures(self) -> list:
-        """汇总所有已启用数据源的最新赛事更新（各源内部已限流）。"""
+        """汇总所有已启用数据源的最新赛事更新（足球 API-Football 先拉）。"""
         all_fixtures: list = []
         for sport_key, sources in [
             ("football", self.football_sources),
@@ -150,11 +161,7 @@ class ArbApp:
         ]:
             if sport_key not in self.cfg.sports:
                 continue
-            for src in sources:
-                try:
-                    all_fixtures.extend(await src.fetch_updates())
-                except Exception as e:
-                    logger.debug("数据源 %s 拉取异常: %s", getattr(src, "source_id", src), e)
+            all_fixtures.extend(await self._fetch_sport_fixtures(sources))
         return all_fixtures
 
     async def start(self) -> None:
@@ -367,24 +374,45 @@ class ArbApp:
                 events = self.aggregator.ingest(updates)
                 await self.aggregator.emit(events)
 
-                # 价格驱动早进场：足球 80 分钟后武装并盯盘口；NBA 默认等终局。
-                self.signals.arm_live_from_fixtures(self.aggregator.live_fixtures())
+                live = self.aggregator.live_fixtures()
+                # 方向三：尾声预订阅 CLOB + 加速赛果轮询
+                snipe = self.signals.prepare_final_snipe(live)
+                self._final_snipe_active = snipe
+                # 直播 ARM（足球默认关闭，见 football_early_entry_enabled）
+                self.signals.arm_live_from_fixtures(live)
 
-                # 存在已武装市场时进入高频节奏，否则空闲低频（省额度）
-                self._has_live_fixtures = self.signals.has_armed()
-                interval = (
-                    self.cfg.sports_poll_live_sec
-                    if self._has_live_fixtures
-                    else self.cfg.sports_poll_idle_sec
+                from src.sports.base import FixtureStatus, SportType
+
+                has_live_football = any(
+                    f.sport == SportType.FOOTBALL and f.status == FixtureStatus.LIVE
+                    for f in live
                 )
+                self._has_live_fixtures = self.signals.has_armed()
+                if self._has_live_fixtures:
+                    interval = self.cfg.sports_poll_live_sec
+                elif snipe:
+                    interval = self.cfg.final_snipe_poll_sec
+                elif has_live_football:
+                    # watchlist 有在踢的足球：保持 2s，等 API-Football 报终局
+                    interval = self.cfg.sports_poll_live_sec
+                else:
+                    interval = self.cfg.sports_poll_idle_sec
             except Exception as e:
                 logger.exception("sports_poll 异常: %s", e)
                 interval = self.cfg.sports_poll_idle_sec
             await asyncio.sleep(interval)
 
+    def _clob_poll_interval(self) -> float:
+        """终局待命 / 直播 ARM 时加速盘口轮询。"""
+        if self._final_snipe_active:
+            return self.cfg.final_snipe_clob_poll_sec
+        if self.signals.has_armed():
+            return self.cfg.clob_eligible_poll_sec
+        return self.cfg.clob_idle_poll_sec
+
     async def _clob_poll_loop(self) -> None:
         try:
-            await self.books.poll_loop(interval=self.cfg.clob_eligible_poll_sec)
+            await self.books.poll_loop(interval=self._clob_poll_interval)
         except asyncio.CancelledError:
             pass
 

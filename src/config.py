@@ -9,6 +9,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
+# CLOB 实盘限价上限：Polymarket 拒收 >0.99，配置再高也无法成交
+CLOB_MAX_ORDER_PRICE = 0.99
+
 
 class ProxyConfig(BaseModel):
     """代理配置（大陆测试用）。"""
@@ -25,20 +28,36 @@ class AppConfig(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     proxy: ProxyConfig = Field(default_factory=ProxyConfig)
 
+    # 策略买入价上限（live 实际取 min(本值, CLOB_MAX_ORDER_PRICE)）
     entry_max_price: float = 0.99
     max_round_notional_usd: float = 50.0
     order_ladder_usd: list[float] | None = None
     min_ladder_step_usd: float = 5.0
     market_cooldown_sec: int = 3600
+    # 终局下单：拉订单簿失败后的重试（应对代理/CLOB 瞬断）
+    final_orderbook_max_attempts: int = 12
+    # 前若干次快速重试间隔（秒），之后用 final_orderbook_retry_interval_sec
+    final_orderbook_fast_attempts: int = 6
+    final_orderbook_fast_retry_sec: float = 2.0
+    final_orderbook_retry_interval_sec: float = 8.0
+
+    # ---- 方向三：终局抢单（足球主攻终局，弱化直播）----
+    final_snipe_enabled: bool = True
+    # 比赛进入该分钟后预订阅 CLOB、加速赛果轮询
+    final_snipe_minute: int = 80
+    final_snipe_poll_sec: float = 1.0
+    final_snipe_clob_poll_sec: float = 0.8
+    # 足球是否允许方案 B 直播早进场（方向三建议 false）
+    football_early_entry_enabled: bool = False
 
     # ---- 价格驱动早进场策略 ----
     early_entry_enabled: bool = True
     # 买入价下限（与 entry_max_price 构成套利窗口，默认 0.60~0.99）
     early_entry_price: float = 0.60
-    # 足球：开赛多少分钟后才允许进入轮询/下单（之前悬念较大，不参与）
+    # 足球：直播早进场最低比赛分钟（须与 blowout_lead 同时满足；一球领先仅终局买）
     football_min_elapsed_min: int = 80
-    # 足球：净胜球分差 > 此值时立即武装买入领先方，不必等 80 分钟（大比分基本锁定胜负）
-    football_blowout_lead: int = 3
+    # 足球：直播买入最低净胜球（≥2 且已≥min_elapsed 分钟；1 球领先等终局）
+    football_blowout_lead: int = 2
     # 足球：拿不到真实比赛分钟时，用开赛后的墙钟分钟兜底（含中场休息缓冲）
     football_fallback_wallclock_min: int = 95
     # NBA：默认不等第四节直播价，仅终局赛果触发下单（见 nba_early_entry_enabled）
@@ -48,16 +67,20 @@ class AppConfig(BaseModel):
     gamma_sync_interval_sec: int = 900
     sports_poll_live_sec: float = 2.0
     sports_poll_idle_sec: float = 60.0
-    # 有资格比赛时盘口高频轮询间隔（秒）
+    # 有 ARM 直播市场时盘口轮询间隔（秒）
     clob_eligible_poll_sec: float = 1.5
+    # 无 ARM/终局待命时盘口轮询（已订阅 token 仍会被刷新）
+    clob_idle_poll_sec: float = 30.0
     conflict_window_sec: int = 120
     health_interval_sec: int = 300
 
     # ---- 各数据源每分钟最大请求数（分开计数限流） ----
     rate_football_data_per_min: int = 10
-    rate_api_football_per_min: int = 10
-    # API-Football 免费层每日配额（100次/天，预留5次余量）
-    api_football_daily_quota: int = 95
+    # API-Football PRO：300 次/分钟、7500 次/天（留余量见 api_football_daily_quota）
+    rate_api_football_per_min: int = 120
+    api_football_daily_quota: int = 7200
+    # 当日赛程（终局补漏）最短间隔；live=all 每次轮询都拉
+    api_football_date_interval_sec: int = 20
     rate_thesportsdb_per_min: int = 30
     rate_balldontlie_per_min: int = 5
     # ESPN 三个运动端点共享此限速（soccer + NBA + NFL 合计不超过该值/分钟）
@@ -151,6 +174,10 @@ class AppConfig(BaseModel):
         if not ladder:
             ladder = [self.min_ladder_step_usd]
         return ladder
+
+    def effective_entry_max_price(self) -> float:
+        """实际买入价上限：策略配置与 CLOB 规则取交集。"""
+        return min(self.entry_max_price, CLOB_MAX_ORDER_PRICE)
 
 
 def _load_env_file(path: Path) -> None:

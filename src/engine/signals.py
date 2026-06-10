@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -53,6 +54,9 @@ class SignalEngine:
         self._armed_tokens: dict[str, str] = {}
         # 正在执行直播下单的市场，避免同一盘口多次回调重复下单
         self._live_processing: set[str] = set()
+        # 终局抢单待命：是否有比赛进入尾声窗口
+        self._snipe_active: bool = False
+        self._snipe_markets: set[str] = set()
 
     def _record_skip(
         self,
@@ -101,7 +105,7 @@ class SignalEngine:
             "home_score": ev.home_score,
             "away_score": ev.away_score,
             "source_id": ev.source_id,
-            "entry_max_price": self.cfg.entry_max_price,
+            "entry_max_price": self.cfg.effective_entry_max_price(),
             "mode": self.cfg.mode,
         }
 
@@ -110,8 +114,68 @@ class SignalEngine:
         return {
             "best_ask": book.best_ask,
             "best_ask_size": book.best_ask_size,
-            "depth_usd": round(book.available_notional(self.cfg.entry_max_price), 4),
+            "depth_usd": round(
+                book.available_notional(self.cfg.effective_entry_max_price()), 4
+            ),
         }
+
+    async def _fetch_final_orderbook(
+        self,
+        token_id: str,
+        ctx: dict[str, Any],
+    ) -> OrderbookSnapshot | None:
+        """终局路径拉订单簿：失败后间隔重试，避免 CLOB/代理瞬断直接错过终局单。"""
+        attempts = max(1, self.cfg.final_orderbook_max_attempts)
+        fast_n = max(0, self.cfg.final_orderbook_fast_attempts)
+        fast_iv = max(0.5, self.cfg.final_orderbook_fast_retry_sec)
+        slow_iv = max(0.5, self.cfg.final_orderbook_retry_interval_sec)
+        last_err = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                book = await self.books.fetch_book_rest(token_id)
+                if attempt > 1:
+                    log_event(
+                        logger,
+                        "STRATEGY_BOOK_RETRY_OK",
+                        detail=f"第 {attempt} 次拉簿成功",
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        **ctx,
+                    )
+                return book
+            except Exception as e:
+                last_err = str(e) or repr(e)
+                if attempt >= attempts:
+                    break
+                interval = fast_iv if attempt < fast_n else slow_iv
+                log_event(
+                    logger,
+                    "STRATEGY_BOOK_RETRY",
+                    detail=f"拉订单簿失败，{interval}s 后重试",
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    retry_in_sec=interval,
+                    error=last_err,
+                    **ctx,
+                )
+                await asyncio.sleep(interval)
+        log_event(
+            logger,
+            "STRATEGY_SKIP",
+            reason="orderbook_fetch_failed",
+            error=last_err,
+            detail=f"终局拉簿 {attempts} 次均失败",
+            **ctx,
+        )
+        self._record_skip(
+            str(ctx.get("market_id", "")),
+            "orderbook_fetch_failed",
+            last_err,
+            sport=str(ctx.get("sport", "")),
+            team_a=str(ctx.get("team_a", "")),
+            team_b=str(ctx.get("team_b", "")),
+        )
+        return None
 
     async def on_final(self, ev: FinalEvent) -> None:
         """终局回调。"""
@@ -183,6 +247,17 @@ class SignalEngine:
         kickoff: Any = None,
     ) -> str | None:
         """按运动+队名在 watchlist 中反查市场 id；多场同名时按开球时间择优。"""
+        ids = self._match_market_ids(sport_value, home, away, kickoff)
+        return ids[0] if ids else None
+
+    def _match_market_ids(
+        self,
+        sport_value: str,
+        home: str,
+        away: str,
+        kickoff: Any = None,
+    ) -> list[str]:
+        """同对阵在 watchlist 中的全部市场（如 Will A win / Will B win 各一盘）。"""
         rows = self.store.list_active_watchlist()
         sport, _ = _sport_key_and_type(sport_value)
         candidates = []
@@ -195,29 +270,109 @@ class SignalEngine:
             ea = normalize_team(away, self.store, sport)
             if teams_match(ta, tb, eh, ea):
                 candidates.append(row)
-        picked = pick_market_by_kickoff(candidates, kickoff)
-        return picked["market_id"] if picked else None
+        if not candidates:
+            return []
+        if kickoff is None:
+            # 无开球时间时不武装多场同名，避免误绑
+            if len(candidates) == 1:
+                return [candidates[0]["market_id"]]
+            return []
+        aligned: list[str] = []
+        for row in candidates:
+            mk = parse_market_kickoff(row)
+            if mk is None:
+                continue
+            if kickoffs_aligned(mk, kickoff):
+                aligned.append(row["market_id"])
+        return aligned
 
     # ---------------------------------------------------------------------
     # 价格驱动早进场（直播）：不等 final，比赛后段一旦某一方价格突破阈值即买入
     # ---------------------------------------------------------------------
-    def arm_live_from_fixtures(self, fixtures: list[FixtureUpdate]) -> None:
-        """根据当前各场实时状态，把已进入早进场阶段的比赛对应市场“武装”。
+    def prepare_final_snipe(self, fixtures: list[FixtureUpdate]) -> bool:
+        """终局抢单待命：尾声分钟预订阅两侧 token，终局 on_final 时拉簿更快。"""
+        from src.engine.final_snipe import is_final_snipe_fixture
+        from src.engine.football_live_entry import football_effective_minute
 
-        足球：开赛 80 分钟后（或墙钟兜底）可直播价买入。
-        NBA：默认不武装，仅终局赛果触发 on_final 下单。
+        if not self.cfg.final_snipe_enabled:
+            self._snipe_active = False
+            return False
+
+        active = False
+        for f in fixtures:
+            if not is_final_snipe_fixture(f, self.cfg):
+                continue
+            active = True
+            for market_id in self._match_market_ids(
+                f.sport.value, f.home_team, f.away_team, f.kickoff_time
+            ):
+                if market_id in self._snipe_markets:
+                    continue
+                row = self.store.get_market(market_id)
+                if not row or row["closed"]:
+                    continue
+                if (row["watch_state"] or "") == "done":
+                    continue
+                uma = (row["uma_status"] or "").lower()
+                if uma in UMA_BLOCK:
+                    continue
+                token_yes = row["token_yes"]
+                token_no = row["token_no"]
+                if not token_yes or not token_no:
+                    continue
+                self._snipe_markets.add(market_id)
+                self.books.subscribe(token_yes)
+                self.books.subscribe(token_no)
+                log_event(
+                    logger,
+                    "STRATEGY_FINAL_SNIPE_PREPARE",
+                    market_id=market_id,
+                    question=row["question"],
+                    home_team=f.home_team,
+                    away_team=f.away_team,
+                    effective_minute=football_effective_minute(f),
+                    source_id=f.source_id,
+                )
+        self._snipe_active = active
+        return active
+
+    def in_final_snipe_mode(self) -> bool:
+        """是否有比赛处于终局抢单待命窗口。"""
+        return self._snipe_active
+
+    def arm_live_from_fixtures(self, fixtures: list[FixtureUpdate]) -> None:
+        """根据当前各场实时状态同步直播 ARM：eligible 则武装，不再 eligible 则解除。
+
+        足球方案 B：仅两球+且≥80' 武装；一球领先不武装（等终局）。
+        方向三：football_early_entry_enabled=false 时足球永不 ARM。
+        同场多个 PM 盘（如 Will A win / Will B win）分别武装。
         """
         if not self.cfg.early_entry_enabled:
             return
+        # 足球关闭直播时解除已有 ARM
+        if not self.cfg.football_early_entry_enabled:
+            for market_id in list(self._armed.keys()):
+                row = self.store.get_market(market_id)
+                if row and row.get("sport") == "football":
+                    self._disarm(market_id)
+        # 已 ARM 但比分/分钟回落（如 2-1→1-0 不可能，但 2-0→1-1 或分钟误判）时解除
+        for market_id in list(self._armed.keys()):
+            row = self.store.get_market(market_id)
+            if not row:
+                self._disarm(market_id)
+                continue
+            live = self._live_fixture_for_market(row)
+            if live is None or not self.aggregator.is_eligible_for_early_entry(live):
+                self._disarm(market_id)
         for f in fixtures:
             if not self.aggregator.is_eligible_for_early_entry(f):
                 continue
-            market_id = self._match_market(
+            for market_id in self._match_market_ids(
                 f.sport.value, f.home_team, f.away_team, f.kickoff_time
-            )
-            if not market_id or market_id in self._armed:
-                continue
-            self._arm_market(market_id, f)
+            ):
+                if market_id in self._armed:
+                    continue
+                self._arm_market(market_id, f)
 
     def has_armed(self) -> bool:
         """是否存在已武装的直播市场（供主循环决定轮询节奏）。"""
@@ -256,6 +411,10 @@ class SignalEngine:
         self.books.subscribe(token_yes)
         self.books.subscribe(token_no)
         self._emit_armed(market_id, True)
+        from src.engine.football_live_entry import football_effective_minute, football_goal_margin
+
+        goal_margin = football_goal_margin(f)
+        eff_min = football_effective_minute(f)
         log_event(
             logger,
             "STRATEGY_LIVE_ARM",
@@ -266,6 +425,8 @@ class SignalEngine:
             team_b=row["team_b"],
             match_minute=f.match_minute_estimate(),
             elapsed_minute=f.elapsed_minute,
+            effective_minute=eff_min,
+            goal_margin=goal_margin,
             period=f.period,
             home_team=f.home_team,
             away_team=f.away_team,
@@ -273,7 +434,7 @@ class SignalEngine:
             away_score=f.away_score,
             source_id=f.source_id,
             early_entry_price=self.cfg.early_entry_price,
-            entry_max_price=self.cfg.entry_max_price,
+            entry_max_price=self.cfg.effective_entry_max_price(),
         )
 
     def _disarm(self, market_id: str) -> None:
@@ -297,12 +458,16 @@ class SignalEngine:
         # NBA 默认终局下单，防止历史 armed 状态误触发直播单
         if info and info.get("sport") == "nba" and not self.cfg.nba_early_entry_enabled:
             return
+        # 方向三：足球关闭直播早进场
+        if info and info.get("sport") == "football" and not self.cfg.football_early_entry_enabled:
+            return
         if snap.best_ask is None:
             return
-        # 买入窗口：[early_entry_price, entry_max_price]（默认 0.60~0.99）
+        # 买入窗口：[early_entry_price, effective_entry_max]（live 上限 0.99）
+        max_price = self.cfg.effective_entry_max_price()
         if snap.best_ask < self.cfg.early_entry_price:
             return
-        if snap.best_ask > self.cfg.entry_max_price:
+        if snap.best_ask > max_price:
             return
         # CLOB 不接受 <0.01 的限价；0.001 多为输家 token，直接跳过
         if snap.best_ask is not None and snap.best_ask < 0.01:
@@ -310,6 +475,13 @@ class SignalEngine:
         if market_id in self._live_processing:
             return
         row = self.store.get_market(market_id)
+        if not row:
+            return
+        # 下单前二次校验：防止 ARM 后比分/分钟变化仍误触发
+        live = self._live_fixture_for_market(row)
+        if live is not None and not self.aggregator.is_eligible_for_early_entry(live):
+            self._disarm(market_id)
+            return
         if row and not self._token_is_leading_side(row, token_id):
             return
         self._live_processing.add(market_id)
@@ -347,6 +519,31 @@ class SignalEngine:
         if uma in UMA_BLOCK:
             self._disarm(market_id)
             return
+        # 执行前再次确认仍符合方案 B（两球+且≥80'）
+        live = self._live_fixture_for_market(row)
+        if live is None:
+            log_event(
+                logger,
+                "STRATEGY_SKIP",
+                reason="live_fixture_missing",
+                market_id=market_id,
+            )
+            return
+        if not self.aggregator.is_eligible_for_early_entry(live):
+            from src.engine.football_live_entry import football_live_entry_block_reason
+
+            self._disarm(market_id)
+            log_event(
+                logger,
+                "STRATEGY_SKIP",
+                reason="live_entry_no_longer_eligible",
+                detail=football_live_entry_block_reason(live, self.cfg),
+                market_id=market_id,
+                home_score=live.home_score,
+                away_score=live.away_score,
+                elapsed_minute=live.elapsed_minute,
+            )
+            return
 
         side = "yes" if token_id == row["token_yes"] else "no"
         ctx: dict[str, Any] = {
@@ -360,14 +557,14 @@ class SignalEngine:
             "best_ask": snap.best_ask,
             "best_ask_size": snap.best_ask_size,
             "early_entry_price": self.cfg.early_entry_price,
-            "entry_max_price": self.cfg.entry_max_price,
+            "entry_max_price": self.cfg.effective_entry_max_price(),
             "trigger": "live_price",
             "mode": self.cfg.mode,
         }
         log_event(
             logger,
             "STRATEGY_LIVE_SIGNAL",
-            detail=f"直播价格进入 [{self.cfg.early_entry_price}, {self.cfg.entry_max_price}]，未等 final 即买入",
+            detail=f"直播价格进入 [{self.cfg.early_entry_price}, {self.cfg.effective_entry_max_price()}]，未等 final 即买入",
             **ctx,
         )
 
@@ -482,14 +679,8 @@ class SignalEngine:
         ctx["token_id"] = token_id
         self.books.subscribe(token_id)
 
-        try:
-            book = await self.books.fetch_book_rest(token_id)
-        except Exception as e:
-            log_event(logger, "STRATEGY_SKIP", reason="orderbook_fetch_failed", error=str(e), **ctx)
-            self._record_skip(
-                market_id, "orderbook_fetch_failed", str(e), sport=ctx["sport"],
-                team_a=str(ctx["team_a"]), team_b=str(ctx["team_b"]),
-            )
+        book = await self._fetch_final_orderbook(token_id, ctx)
+        if book is None:
             return
 
         book_fields = self._book_ctx(book)
@@ -525,12 +716,13 @@ class SignalEngine:
             )
             return
 
-        if book.best_ask > self.cfg.entry_max_price:
+        max_price = self.cfg.effective_entry_max_price()
+        if book.best_ask > max_price:
             log_event(
                 logger,
                 "STRATEGY_NO_EDGE",
                 reason="ask_above_max",
-                detail=f"ask={book.best_ask} > max={self.cfg.entry_max_price}，未下单",
+                detail=f"ask={book.best_ask} > max={max_price}，未下单",
                 **ctx,
             )
             self._record_skip(

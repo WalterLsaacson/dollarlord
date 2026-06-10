@@ -85,6 +85,12 @@ class TheSportsDbProvider:
         if updates:
             self.store.touch_source(self.source_id)
             self._last = updates
+            # 公共 demo key "123" 每天仅返回极少赛事，无法覆盖非洲/摩洛哥等联赛
+            if self.cfg.thesportsdb_key == "123" and len(updates) < 10:
+                logger.debug(
+                    "thesportsdb demo key 仅 %d 场；升级 Patreon key 可覆盖更多联赛",
+                    len(updates),
+                )
             return updates
         return self._last
 

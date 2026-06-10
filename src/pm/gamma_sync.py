@@ -45,6 +45,30 @@ NON_MATCH_KEYWORDS = (
     "series",
 )
 
+# PM 电竞单场 tag（实测 CS2 用 counter-strike-2，非 cs2）
+_CS2_EVENT_TAGS = frozenset({"cs2", "csgo", "counter-strike", "counter-strike-2"})
+_LOL_EVENT_TAGS = frozenset({"lol", "league-of-legends"})
+
+# 电竞联赛名常含 "Series"（Exort Series / CCT Series），勿用 NON_MATCH 里的 series 误杀
+_ESPORTS_MATCH_EXTRA_SKIP = frozenset(
+    k for k in NON_MATCH_KEYWORDS if k not in ("series", "winner")
+)
+
+
+def _event_tags_has_cs2(event_tags: set[str]) -> bool:
+    return bool(event_tags & _CS2_EVENT_TAGS)
+
+
+def _event_tags_has_lol(event_tags: set[str]) -> bool:
+    return bool(event_tags & _LOL_EVENT_TAGS)
+
+
+def _is_esports_match_event(event_tags: set[str]) -> bool:
+    """带 games + CS2/LoL 的 Polymarket 单场对阵 event。"""
+    if "games" not in event_tags:
+        return False
+    return _event_tags_has_cs2(event_tags) or _event_tags_has_lol(event_tags)
+
 
 class GammaSync:
     """从 Gamma 同步体育赛事市场。"""
@@ -72,12 +96,82 @@ class GammaSync:
             if sport_name not in self.cfg.sports and sport_filter not in self.cfg.sports:
                 continue
             try:
-                rows = await self._fetch_sport_markets(client, sport_filter, sport_name)
+                # 电竞单场在 tag_slug=esports 下更全；传统体育仍扫 sports
+                if sport_name in ("cs2", "lol"):
+                    rows = await self._fetch_esports_markets(client, sport_name)
+                else:
+                    rows = await self._fetch_sport_markets(client, sport_filter, sport_name)
                 markets.extend(rows)
             except Exception as e:
                 logger.error("Gamma 同步 %s 失败: %s", sport_filter, e)
 
         return markets
+
+    async def _fetch_esports_markets(
+        self,
+        client: Any,
+        sport: str,
+    ) -> list[MarketRow]:
+        """拉取 CS2/LoL 单场 moneyline（Gamma tag_slug=esports + games）。"""
+        rows: list[MarketRow] = []
+        seen_market_ids: set[str] = set()
+        offset = 0
+        limit = 100
+        scanned_events = 0
+        scanned_markets = 0
+        while True:
+            url = f"{self.cfg.gamma_base_url}/events"
+            params = {
+                "closed": "false",
+                "tag_slug": "esports",
+                "limit": limit,
+                "offset": offset,
+            }
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            events = resp.json()
+            if not events:
+                break
+            scanned_events += len(events)
+            for ev in events:
+                event_title = str(ev.get("title", ""))
+                event_text = f"{event_title} {ev.get('description', '')}".lower()
+                event_tags = {
+                    str(t.get("slug", "")).lower()
+                    for t in (ev.get("tags") or [])
+                    if isinstance(t, dict)
+                }
+                if sport == "cs2" and not _event_tags_has_cs2(event_tags):
+                    continue
+                if sport == "lol" and not _event_tags_has_lol(event_tags):
+                    continue
+                if "games" not in event_tags:
+                    continue
+                markets = ev.get("markets") or []
+                scanned_markets += len(markets)
+                for m in markets:
+                    row = self._parse_market(
+                        m, sport, sport, event_title, event_text, event_tags
+                    )
+                    if row and row.market_id not in seen_market_ids:
+                        self.store.upsert_market(row)
+                        rows.append(row)
+                        seen_market_ids.add(row.market_id)
+            if len(events) < limit:
+                break
+            offset += limit
+            if offset >= 5000:
+                break
+        log_event(
+            logger,
+            "GAMMA_DISCOVERY",
+            sport=sport,
+            scanned_events=scanned_events,
+            scanned_markets=scanned_markets,
+            candidate_markets=len(rows),
+            source="esports_tag",
+        )
+        return rows
 
     async def _fetch_sport_markets(
         self,
@@ -152,13 +246,20 @@ class GammaSync:
         tags = json.dumps(m.get("tags") or []).lower()
         text = f"{event_text} {question} {slug} {tags}"
 
-        # 先挡掉明显非单场盘口，避免污染 watchlist
-        if any(k in text for k in NON_MATCH_KEYWORDS):
+        market_type = (m.get("sportsMarketType") or "").lower()
+        esports_match = _is_esports_match_event(event_tags)
+
+        # 先挡掉明显非单场盘口；电竞联赛名含 Series 时用放宽词表
+        skip_keywords = (
+            _ESPORTS_MATCH_EXTRA_SKIP
+            if esports_match and market_type in ("", "moneyline")
+            else NON_MATCH_KEYWORDS
+        )
+        if any(k in text for k in skip_keywords):
             return None
 
-        market_type = (m.get("sportsMarketType") or "").lower()
-        # 电竞市场 PM 通常不标注 sportsMarketType，跳过该过滤；传统体育仅保留 moneyline
-        if market_type and market_type not in {"moneyline"} and sport not in ("cs2", "lol"):
+        # 仅保留单场胜负盘（有标注时）；未标注的电竞老盘仍放行
+        if market_type and market_type != "moneyline":
             return None
 
         is_nba = "nba" in event_tags
@@ -166,8 +267,8 @@ class GammaSync:
         is_mlb = "mlb" in event_tags or "baseball" in event_tags
         is_nhl = "nhl" in event_tags or "hockey" in event_tags
         is_nfl = "nfl" in event_tags or "american-football" in event_tags
-        is_cs2 = "cs2" in event_tags or "csgo" in event_tags or "counter-strike" in event_tags
-        is_lol = "lol" in event_tags or "league-of-legends" in event_tags
+        is_cs2 = _event_tags_has_cs2(event_tags)
+        is_lol = _event_tags_has_lol(event_tags)
         if sport == "nba" and any(h in text for h in NBA_EXCLUDE_HINTS):
             return None
         if sport == "football" and any(h in text for h in FOOTBALL_EXCLUDE_HINTS):
@@ -286,16 +387,31 @@ class GammaSync:
         now = datetime.now(timezone.utc)
         return (now - timedelta(days=7)) <= dt <= (now + timedelta(days=10))
 
+    def _clean_team_label(self, name: str) -> str:
+        """去掉电竞盘口里的 BO 赛制、联赛后缀等。"""
+        s = re.sub(r"^will\s+", "", name.strip(), flags=re.I)
+        # 去掉 (BO3) - LPL Playoffs 等后缀
+        s = re.sub(r"\s*\(bo\d+\).*$", "", s, flags=re.I)
+        s = re.sub(r"\s+end in a draw$", "", s, flags=re.I)
+        return s.strip()
+
     def _teams_from_question(self, question: str) -> tuple[str | None, str | None]:
-        """从 question 文本启发式提取两队。"""
+        """从 question / event title 启发式提取两队（含 LoL:/Counter-Strike: 前缀）。"""
+        q = question.strip()
+        q = re.sub(
+            r"^(counter-strike|lol|dota\s*2|valorant)\s*:\s*",
+            "",
+            q,
+            flags=re.I,
+        )
         for sep in (" vs. ", " vs ", " v "):
-            if sep in question:
-                parts = question.split(sep, 1)
+            if sep in q:
+                parts = q.split(sep, 1)
                 if len(parts) == 2:
-                    left = re.sub(r"^will\s+", "", parts[0].strip(), flags=re.I)
-                    right = parts[1].split("?")[0].strip()
-                    right = re.sub(r"\s+end in a draw$", "", right, flags=re.I)
-                    return left, right
+                    left = self._clean_team_label(parts[0])
+                    right = self._clean_team_label(parts[1].split("?")[0])
+                    if left and right:
+                        return left, right
         return None, None
 
     async def refresh_market_status(self, market_id: str) -> dict | None:
